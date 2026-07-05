@@ -198,11 +198,20 @@ static int run(const Options& opts) {
             double dt = now - t_last_stats;
             uint64_t cf = capture.frameCount();
             uint64_t pf = renderer.presentedFrames();
+            CadenceStats cs = capture.cadence();
+            char source[64];
+            if (cs.source_fps > 0.0)
+                std::snprintf(source, sizeof(source),
+                              "%.2f fps (%s%s, %.0f%% dup)", cs.source_fps,
+                              cs.pattern.c_str(), cs.locked ? "" : ", settling",
+                              cs.dup_ratio * 100.0);
+            else
+                std::snprintf(source, sizeof(source), "measuring");
             logInfo(TAG,
-                    "capture %5.1f fps (%s) | present %5.1f fps | "
+                    "capture %5.1f fps (%s) | source %s | present %5.1f fps | "
                     "video delay %5.1f ms | luma last/max %.1f/%.1f",
                     double(cf - last_cap_frames) / dt,
-                    capture.usingDmaBuf() ? "dmabuf" : "shm",
+                    capture.usingDmaBuf() ? "dmabuf" : "shm", source,
                     double(pf - last_presented) / dt, renderer.latencyMs(),
                     capture.lastLuma(), capture.maxLuma());
             last_cap_frames = cf;
