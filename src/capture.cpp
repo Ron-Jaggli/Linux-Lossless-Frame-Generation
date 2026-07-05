@@ -18,8 +18,13 @@
 namespace lsfg {
 
 static const char* TAG = "capture";
-static constexpr uint32_t PROBE_SIZE = 16;
-static constexpr uint32_t PROBE_INTERVAL = 30;
+// 64x64 = 4096 sample points: enough to tell real motion from a repeated
+// frame, and a 16 KiB readback per frame is noise next to the frame copy.
+static constexpr uint32_t PROBE_SIZE = 64;
+// Per-byte tolerance when comparing consecutive probes. Identical source
+// buffers downscale to identical bytes, so 1 LSB of slack only guards
+// against exotic compositor re-encodes without masking real changes.
+static constexpr int DUP_TOLERANCE = 1;
 
 struct FormatMap {
     uint32_t spa;
@@ -273,6 +278,13 @@ void Capture::handleFormatChanged(const spa_pod* param) {
             is_dmabuf_ ? "" : " (CPU copy path)", info.framerate.num,
             info.framerate.denom);
 
+    // New format = new stream characteristics; restart cadence measurement.
+    prev_probe_valid_ = false;
+    {
+        std::lock_guard lock(cadence_mutex_);
+        cadence_tracker_.reset();
+    }
+
     clearImports();
 
     bool pool_ok;
@@ -394,7 +406,7 @@ void Capture::handleProcess() {
             uint64_t seq = frames_.fetch_add(1) + 1;
             pool_->publish(idx, seq, t_cap);
             if (probe_pending_)
-                readProbe();
+                readProbe(t_cap);
         }
     }
     pw_stream_queue_buffer(stream_, last);
@@ -448,8 +460,7 @@ bool Capture::processDmaBuf(pw_buffer* buf, int write_idx) {
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &acquire);
 
-    bool probe = probe_every_frame_.load() || (frames_.load() % PROBE_INTERVAL) == 0;
-    recordPoolBlit(cmd_, it->second.image, write_idx, probe);
+    recordPoolBlit(cmd_, it->second.image, write_idx, /*probe=*/true);
 
     // Release back to the compositor.
     VkImageMemoryBarrier release = acquire;
@@ -505,7 +516,6 @@ bool Capture::processShm(pw_buffer* buf, int write_idx) {
     vkCmdCopyBufferToImage(cmd_, staging_, dst,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    bool probe = probe_every_frame_.load() || (frames_.load() % PROBE_INTERVAL) == 0;
     // recordPoolBlit handles the DST->SRC transition + probe; reuse it with
     // src == dst is wrong, so inline the tail here.
     VkImageMemoryBarrier to_src = to_dst;
@@ -516,8 +526,7 @@ bool Capture::processShm(pw_buffer* buf, int write_idx) {
     vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &to_src);
-    if (probe)
-        recordProbeFromPool(cmd_, dst);
+    recordProbeFromPool(cmd_, dst);
 
     vkEndCommandBuffer(cmd_);
     return submitAndWait(cmd_);
@@ -612,9 +621,32 @@ void Capture::recordProbeFromPool(VkCommandBuffer cmd, VkImage pool_img) {
     probe_pending_ = true;
 }
 
-void Capture::readProbe() {
+void Capture::readProbe(double t_frame) {
     probe_pending_ = false;
     const auto* px = static_cast<const uint8_t*>(probe_map_);
+
+    // Duplicate repaint? Compare color bytes against the previous frame's
+    // probe; the fourth byte is skipped because BGRx/RGBx sources leave it
+    // undefined and it may differ between otherwise identical buffers.
+    bool duplicate = prev_probe_valid_;
+    if (prev_probe_valid_) {
+        for (uint32_t i = 0; i < PROBE_SIZE * PROBE_SIZE * 4; i++) {
+            if ((i & 3) == 3)
+                continue;
+            int d = int(px[i]) - int(prev_probe_[i]);
+            if (d < -DUP_TOLERANCE || d > DUP_TOLERANCE) {
+                duplicate = false;
+                break;
+            }
+        }
+    }
+    std::memcpy(prev_probe_.data(), px, prev_probe_.size());
+    prev_probe_valid_ = true;
+    {
+        std::lock_guard lock(cadence_mutex_);
+        cadence_tracker_.addFrame(t_frame, duplicate);
+    }
+
     uint64_t sum = 0;
     for (uint32_t i = 0; i < PROBE_SIZE * PROBE_SIZE; i++) {
         // mean of the three color bytes; channel order irrelevant
@@ -626,6 +658,11 @@ void Capture::readProbe() {
     if (luma > prev)
         max_luma_.store(luma);
     luma_samples_.fetch_add(1);
+}
+
+CadenceStats Capture::cadence() const {
+    std::lock_guard lock(cadence_mutex_);
+    return cadence_tracker_.stats();
 }
 
 bool Capture::submitAndWait(VkCommandBuffer cmd) {
@@ -708,6 +745,7 @@ bool Capture::ensureVkResources() {
     if (vkMapMemory(ctx_->device, probe_buf_mem_, 0, VK_WHOLE_SIZE, 0,
                     &probe_map_) != VK_SUCCESS)
         return false;
+    prev_probe_.resize(PROBE_SIZE * PROBE_SIZE * 4);
     return true;
 }
 

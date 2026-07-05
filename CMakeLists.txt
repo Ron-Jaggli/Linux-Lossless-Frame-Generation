@@ -9,29 +9,50 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
 
-find_package(PkgConfig REQUIRED)
-find_package(Vulkan REQUIRED)
-pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
-pkg_check_modules(PORTAL REQUIRED IMPORTED_TARGET libportal)
-pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
+# OFF builds only the dependency-free core + tests (used by CI, which has
+# no SDL3/PipeWire/portal packages).
+option(LSFG_BUILD_APP "Build the lsfg-cap executable" ON)
+include(CTest)
 
-add_executable(lsfg-cap
-    src/main.cpp
-    src/portal.cpp
-    src/capture.cpp
-    src/renderer.cpp
-    src/vk/context.cpp
-    src/vk/frame_pool.cpp
-    src/vk/dmabuf_import.cpp
+# Pure logic shared by the app and the unit tests; no system dependencies.
+add_library(lsfg_core STATIC
+    src/core/cadence.cpp
 )
+target_include_directories(lsfg_core PUBLIC src)
+target_compile_options(lsfg_core PRIVATE -Wall -Wextra)
 
-target_include_directories(lsfg-cap PRIVATE src)
-target_compile_options(lsfg-cap PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
-target_link_libraries(lsfg-cap PRIVATE
-    Vulkan::Vulkan
-    PkgConfig::PIPEWIRE
-    PkgConfig::PORTAL
-    PkgConfig::SDL3
-)
+if(LSFG_BUILD_APP)
+    find_package(PkgConfig REQUIRED)
+    find_package(Vulkan REQUIRED)
+    pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
+    pkg_check_modules(PORTAL REQUIRED IMPORTED_TARGET libportal)
+    pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
 
-install(TARGETS lsfg-cap RUNTIME DESTINATION bin)
+    add_executable(lsfg-cap
+        src/main.cpp
+        src/portal.cpp
+        src/capture.cpp
+        src/renderer.cpp
+        src/vk/context.cpp
+        src/vk/frame_pool.cpp
+        src/vk/dmabuf_import.cpp
+    )
+
+    target_compile_options(lsfg-cap PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+    target_link_libraries(lsfg-cap PRIVATE
+        lsfg_core
+        Vulkan::Vulkan
+        PkgConfig::PIPEWIRE
+        PkgConfig::PORTAL
+        PkgConfig::SDL3
+    )
+
+    install(TARGETS lsfg-cap RUNTIME DESTINATION bin)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(lsfg_test_cadence tests/test_cadence.cpp)
+    target_compile_options(lsfg_test_cadence PRIVATE -Wall -Wextra)
+    target_link_libraries(lsfg_test_cadence PRIVATE lsfg_core)
+    add_test(NAME cadence COMMAND lsfg_test_cadence)
+endif()

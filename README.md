@@ -10,7 +10,7 @@ desktop portal and presents an interpolated stream in its own window.
 
 ```
 PipeWire screencast (xdg-desktop-portal, DMA-BUF zero-copy w/ SHM fallback)
-  → duplicate detection + cadence recovery        [milestone 2]
+  → duplicate detection + cadence recovery        [milestone 2 ✓]
   → LSFG frame interpolation 2x/3x/4x             [milestone 3]
   → Vulkan presentation window (SDL3)             [milestone 1 ✓]
 ```
@@ -21,7 +21,7 @@ PipeWire screencast (xdg-desktop-portal, DMA-BUF zero-copy w/ SHM fallback)
 |---|---|
 | 0 — DRM black-frame test (`--drm-test`) | implemented, needs a run against Crunchyroll |
 | 1 — capture → display passthrough | implemented |
-| 2 — duplicate detection + source cadence recovery | not started |
+| 2 — duplicate detection + source cadence recovery | implemented |
 | 3 — LSFG shader integration, 2x interpolation | not started |
 | 4 — 3x/4x, cadence-locked interpolation, polish | not started |
 
@@ -47,6 +47,10 @@ distrobox enter lsfg-dev -- cmake --build build
 
 The binary talks to the host's portal/PipeWire/GPU, so it runs fine from
 inside the box: `distrobox enter lsfg-dev -- ./build/lsfg-cap`.
+
+Unit tests (pure logic, no GPU/display needed): `ctest --test-dir build`.
+On a machine without the app's dependencies, configure with
+`-DLSFG_BUILD_APP=OFF` to build and test just the core.
 
 ## Usage
 
@@ -100,17 +104,19 @@ building on it.
   graphics queue guarded by a mutex.
 - **Latency:** every stats line logs end-to-end video delay (PipeWire pts →
   present), EMA-smoothed. Target < 50 ms so lipsync with browser audio holds.
+- **Duplicate detection + cadence (milestone 2):** a 64×64 GPU downscale
+  probe runs on every frame; consecutive probes matching within 1 LSB per
+  color byte mark a duplicate repaint. A pure, unit-tested `CadenceTracker`
+  turns the (timestamp, duplicate) stream into the recovered source rate and
+  repeat pattern (e.g. `23.98 fps (3:2)` for film in a 60 Hz browser), also
+  handling damage-driven compositors that never deliver duplicates. Shown in
+  the stats line; milestone 3 consumes it to interpolate only unique frames.
 - **Edge cases:** source resize renegotiates and rebuilds the pool; stream
   errors/session-close are detected and reported; corrupted chunks skipped;
-  black frames detected by a 16×16 GPU downscale probe (every 30th frame in
-  normal operation, every frame under `--drm-test`).
+  black frames detected by the same probe's mean luminance.
 
 ## Roadmap details
 
-- **Milestone 2:** damage/new-buffer signaling where available, GPU hash
-  compare otherwise; measure repaint pattern (e.g. 3:2 pulldown of 23.976 fps
-  in a 60 Hz browser) and feed only unique frames onward, with a one-frame
-  buffer so interpolation timing is exact.
 - **Milestone 3:** LSFG shader chain lifted per lsfg-vk's approach, reading
   `Lossless.dll` from your Steam library (path autodetected from lsfg-vk's
   config when present).
