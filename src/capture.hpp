@@ -1,10 +1,12 @@
 #pragma once
 
+#include "core/cadence.hpp"
 #include "vk/dmabuf_import.hpp"
 
 #include <atomic>
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -23,8 +25,10 @@ class FramePool;
 // PipeWire screencast consumer. Frame handling runs on PipeWire's loop
 // thread; every arriving frame is copied (DMA-BUF import + GPU blit, or SHM
 // staging upload) into the shared FramePool and fence-waited before the
-// PipeWire buffer is requeued. A 16x16 downscale probe measures mean
-// luminance for the DRM-black-frame test and general diagnostics.
+// PipeWire buffer is requeued. A 64x64 downscale probe runs on every frame:
+// comparing it against the previous frame's probe detects duplicate
+// repaints (pulldown), which feeds the cadence tracker, and its mean
+// luminance drives the DRM-black-frame test.
 class Capture {
 public:
     bool start(vk::Context& ctx, vk::FramePool& pool, int pipewire_fd,
@@ -39,8 +43,8 @@ public:
     double maxLuma() const { return max_luma_.load(); }
     uint64_t lumaSamples() const { return luma_samples_.load(); }
     bool usingDmaBuf() const { return negotiated_dmabuf_.load(); }
-    // probe every frame (DRM test) instead of every 30th
-    void setProbeEveryFrame(bool v) { probe_every_frame_.store(v); }
+    // snapshot of the recovered source cadence (duplicate-frame analysis)
+    CadenceStats cadence() const;
 
 private:
     // PipeWire callbacks (run on the PipeWire loop thread)
@@ -58,7 +62,7 @@ private:
                         bool probe);
     void recordProbeFromPool(VkCommandBuffer cmd, VkImage pool_img);
     bool submitAndWait(VkCommandBuffer cmd);
-    void readProbe();
+    void readProbe(double t_frame);
     void fallbackToShm();
 
     std::vector<const spa_pod*> buildFormatParams(spa_pod_builder* b,
@@ -115,8 +119,13 @@ private:
     std::atomic<double> last_luma_{-1.0};
     std::atomic<double> max_luma_{-1.0};
     std::atomic<uint64_t> luma_samples_{0};
-    std::atomic<bool> probe_every_frame_{false};
     bool probe_pending_ = false;
+
+    // duplicate detection + cadence (probe compare on the capture thread)
+    std::vector<uint8_t> prev_probe_;
+    bool prev_probe_valid_ = false;
+    CadenceTracker cadence_tracker_;
+    mutable std::mutex cadence_mutex_;
 };
 
 } // namespace lsfg

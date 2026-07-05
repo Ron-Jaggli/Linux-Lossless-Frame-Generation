@@ -160,8 +160,6 @@ static int run(const Options& opts) {
     saveRestoreToken(portal.restoreToken());
 
     Capture capture;
-    if (opts.drm_test)
-        capture.setProbeEveryFrame(true);
     if (!capture.start(ctx, pool, portal.stream().pipewire_fd,
                        portal.stream().node_id, !opts.no_dmabuf))
         return 1;
