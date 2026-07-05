@@ -1,3 +1,4 @@
 build/
+build-core/
 .cache/
 compile_commands.json
