@@ -87,6 +87,7 @@ frame for ~12 s and prints a verdict:
 On Linux, Firefox's Widevine (L3) decodes in software without a protected
 video path, so window capture is *expected* to work — but verify before
 building on it.
+I am using waterfox so like if you do run into problems then use chrome or waterfox but most browsers might work
 
 ## Design notes
 
