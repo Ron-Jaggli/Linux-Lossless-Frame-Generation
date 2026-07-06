@@ -17,6 +17,7 @@ include(CTest)
 # Pure logic shared by the app and the unit tests; no system dependencies.
 add_library(lsfg_core STATIC
     src/core/cadence.cpp
+    src/core/pacer.cpp
 )
 target_include_directories(lsfg_core PUBLIC src)
 target_compile_options(lsfg_core PRIVATE -Wall -Wextra)
@@ -55,4 +56,9 @@ if(BUILD_TESTING)
     target_compile_options(lsfg_test_cadence PRIVATE -Wall -Wextra)
     target_link_libraries(lsfg_test_cadence PRIVATE lsfg_core)
     add_test(NAME cadence COMMAND lsfg_test_cadence)
+
+    add_executable(lsfg_test_pacer tests/test_pacer.cpp)
+    target_compile_options(lsfg_test_pacer PRIVATE -Wall -Wextra)
+    target_link_libraries(lsfg_test_pacer PRIVATE lsfg_core)
+    add_test(NAME pacer COMMAND lsfg_test_pacer)
 endif()
