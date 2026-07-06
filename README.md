@@ -1,5 +1,5 @@
 # Linux-Lossless-Frame-Generation (lsfg-cap) THIS WILL BE VIBECODED!!!!
-
+# YOU WILL NEED A COPY OF LOSSLESSCALING(working on one without it right now but not opensource ;)
 Lossless Scaling-style **capture-based frame generation for any window on
 Linux** — aimed at video playback (e.g. Crunchyroll in Firefox), not games.
 Unlike [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk), which injects into a
