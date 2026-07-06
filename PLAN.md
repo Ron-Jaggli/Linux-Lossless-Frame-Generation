@@ -87,6 +87,15 @@ are unchanged and cannot be answered from a container:
 
 ## Phase 2 — Milestone 3a: interpolation engine scaffolding
 
+> **Status: executed 2026-07-06.** All four increments landed as planned
+> (pacer + tests, pool pair leases with the 6-slot correction, blend
+> interpolator with committed SPIR-V, full wiring with `-m`/`G`/stats).
+> Core tests 2/2 green under the CI configuration; the app compiles and
+> links clean. Runtime validation (does 2x look right, what does the
+> added delay measure) needs the owner's desktop — same as the still-open
+> `--drm-test` run. Next milestone: 3b, the LSFG shader chain as a second
+> `Interpolator` implementation.
+
 Milestone 3 as originally scoped ("lift the LSFG shader chain from
 Lossless.dll the way lsfg-vk does") has two hard external dependencies:
 the user-owned `Lossless.dll` and a real GPU to validate against — neither
