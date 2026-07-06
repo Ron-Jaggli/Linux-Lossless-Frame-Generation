@@ -3,6 +3,8 @@
 #include "log.hpp"
 #include "vk/context.hpp"
 
+#include <cassert>
+
 namespace lsfg::vk {
 
 static const char* TAG = "pool";
@@ -16,11 +18,12 @@ bool FramePool::create(Context& ctx, VkFormat format, uint32_t width,
 
 bool FramePool::recreate(VkFormat format, uint32_t width, uint32_t height) {
     std::unique_lock lock(mutex_);
-    reader_done_.wait(lock, [&] { return reading_ == -1; });
+    reader_done_.wait(lock, [&] { return reading_ == -1 && pair_a_ == -1; });
     // The reader fence-waits its blit before releasing, and the writer
     // fence-waits before publishing, so no GPU work references these images.
     destroySlotsLocked();
     latest_ = -1;
+    unique_latest_ = unique_prev_ = -1;
     return createSlotsLocked(format, width, height);
 }
 
@@ -60,7 +63,7 @@ bool FramePool::createSlotsLocked(VkFormat format, uint32_t width,
     format_ = format;
     width_ = width;
     height_ = height;
-    logInfo(TAG, "frame pool: 3x %ux%u", width, height);
+    logInfo(TAG, "frame pool: %dx %ux%u", SLOT_COUNT, width, height);
     return true;
 }
 
@@ -82,22 +85,31 @@ void FramePool::destroy() {
     destroySlotsLocked();
     latest_ = -1;
     reading_ = -1;
+    unique_latest_ = unique_prev_ = -1;
+    pair_a_ = pair_b_ = -1;
 }
 
 int FramePool::acquireWrite() {
     std::unique_lock lock(mutex_);
-    for (int i = 0; i < 3; i++) {
-        if (i != latest_ && i != reading_)
+    for (int i = 0; i < SLOT_COUNT; i++) {
+        if (i != latest_ && i != reading_ && i != unique_latest_ &&
+            i != unique_prev_ && i != pair_a_ && i != pair_b_)
             return i;
     }
-    return 0; // unreachable
+    assert(!"FramePool::acquireWrite: no free slot");
+    return 0; // unreachable: at most 5 slots can be excluded
 }
 
-void FramePool::publish(int index, uint64_t seq, double t_capture) {
+void FramePool::publish(int index, uint64_t seq, double t_capture,
+                        bool unique) {
     std::unique_lock lock(mutex_);
     slots_[index].seq = seq;
     slots_[index].t_capture = t_capture;
     latest_ = index;
+    if (unique) {
+        unique_prev_ = unique_latest_;
+        unique_latest_ = index;
+    }
 }
 
 FramePool::ReadLease FramePool::acquireRead() {
@@ -120,6 +132,34 @@ void FramePool::releaseRead(const ReadLease& lease) {
         return;
     std::unique_lock lock(mutex_);
     reading_ = -1;
+    reader_done_.notify_all();
+}
+
+FramePool::PairLease FramePool::acquirePairRead() {
+    std::unique_lock lock(mutex_);
+    PairLease lease;
+    if (unique_prev_ < 0 || !valid())
+        return lease;
+    pair_a_ = unique_prev_;
+    pair_b_ = unique_latest_;
+    lease.index_a = pair_a_;
+    lease.index_b = pair_b_;
+    lease.image_a = slots_[pair_a_].image;
+    lease.image_b = slots_[pair_b_].image;
+    lease.seq_a = slots_[pair_a_].seq;
+    lease.seq_b = slots_[pair_b_].seq;
+    lease.t_capture_a = slots_[pair_a_].t_capture;
+    lease.t_capture_b = slots_[pair_b_].t_capture;
+    lease.width = width_;
+    lease.height = height_;
+    return lease;
+}
+
+void FramePool::releasePairRead(const PairLease& lease) {
+    if (!lease.valid())
+        return;
+    std::unique_lock lock(mutex_);
+    pair_a_ = pair_b_ = -1;
     reader_done_.notify_all();
 }
 
