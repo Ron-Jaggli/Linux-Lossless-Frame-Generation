@@ -1,0 +1,26 @@
+#version 450
+
+// Baseline interpolator: dst = mix(A, B, phase). Knowingly naive (motion
+// ghosts instead of moving); it exists to exercise the full frame-generation
+// path until the LSFG chain replaces it behind the same interface.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D img_a;
+layout(binding = 1) uniform sampler2D img_b;
+layout(binding = 2, rgba8) uniform writeonly image2D dst;
+
+layout(push_constant) uniform Push {
+    float phase;
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(dst);
+    if (p.x >= size.x || p.y >= size.y)
+        return;
+    vec2 uv = (vec2(p) + 0.5) / vec2(size);
+    vec3 a = textureLod(img_a, uv, 0.0).rgb;
+    vec3 b = textureLod(img_b, uv, 0.0).rgb;
+    imageStore(dst, p, vec4(mix(a, b, pc.phase), 1.0));
+}
