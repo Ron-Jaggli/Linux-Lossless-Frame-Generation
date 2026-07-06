@@ -9,127 +9,160 @@
   the desktop portal and re-present it, with LSFG interpolation to follow.
   Milestones 0/1 (portal/PipeWire capture → Vulkan passthrough window) were
   implemented on `claude/wizardly-clarke-4fk1ip`.
-- **2026-07-05 (this pass):** fresh recon of the actual codebase, recorded
-  below, plus the plan for Milestone 2.
+- **2026-07-05 (evening):** Milestone 2 (duplicate detection + cadence
+  recovery) plus CI landed and merged as PR #2.
+- **2026-07-06 (this pass):** fresh recon recorded below, plus the plan for
+  Milestone 3 groundwork: frame pacing, unique-frame history, and a
+  placeholder GPU interpolator that makes `-m N` actually generate frames.
 
-## Phase 1 recon — current state (2026-07-05)
+## Phase 1 recon — current state (2026-07-06)
 
 ### Module map
 
 ```
-CMakeLists.txt          C++20, single executable; deps: Vulkan, libpipewire-0.3,
-                        libportal, SDL3 (pkg-config)
+CMakeLists.txt          C++20; lsfg_core static lib (pure logic) + lsfg-cap
+                        executable (deps: Vulkan, libpipewire-0.3, libportal,
+                        SDL3 via pkg-config). LSFG_BUILD_APP=OFF builds only
+                        core + tests; BUILD_TESTING adds the CTest binary.
+.github/workflows/ci.yml  ubuntu-latest, core-only build, runs ctest.
 src/
-  main.cpp        265L  CLI parsing, portal handshake pump, main loop,
-                        per-second stats line, DRM black-frame verdict
-  options.hpp      20L  Options struct shared across modules
+  main.cpp        272L  CLI parsing, portal pump, main loop, per-second stats
+                        (capture/source-cadence/present/latency/luma), DRM
+                        black-frame verdict, restore-token persistence
+  options.hpp      20L  Options struct (multiplier parsed, not yet consumed)
   log.hpp          48L  leveled printf-style logging + monotonic nowSeconds()
-  portal.{hpp,cpp} 183L PortalSession: xdg-desktop-portal ScreenCast handshake
-                        via libportal (picker dialog, restore token, close signal)
-  capture.{hpp,cpp}900L Capture: PipeWire stream consumer. DMA-BUF negotiation
-                        with DRM modifier fixation, SHM fallback (incl. mid-
-                        stream renegotiation), per-frame copy into the pool,
-                        16×16 luminance probe (every 30th frame; every frame
-                        under --drm-test)
+  portal.{hpp,cpp} 183L PortalSession: ScreenCast handshake via libportal
+  capture.{hpp,cpp}947L Capture: PipeWire consumer. DMA-BUF negotiation with
+                        modifier fixation, SHM fallback incl. mid-stream
+                        renegotiation; copies every frame into the FramePool;
+                        64×64 probe every frame → duplicate detection (feeds
+                        CadenceTracker) + luminance (DRM test)
   renderer.{hpp,cpp}225L Renderer: blits latest pool frame to the SDL3/Vulkan
                         swapchain, letterboxed; latency EMA
-  vk/context.*     402L instance/device/queue setup, swapchain, DRM modifier
-                        query, validation layers
-  vk/frame_pool.*  202L triple-buffered VkImage pool decoupling capture (writer)
-                        from render (reader); publish/acquireRead lease model
+  core/cadence.*   203L CadenceTracker (pure, unit-tested): recovers source
+                        fps + repeat pattern ("3:2" etc.) from
+                        (timestamp, is_duplicate) events; handles pulldown
+                        and damage-driven delivery; pause/seek resets
+  vk/context.*     402L instance/device/queue, swapchain, DRM modifier query
+  vk/frame_pool.*  202L triple-buffered VkImage pool, publish/acquireRead
+                        lease model; single "latest" frame only
   vk/dmabuf_import.*150L VkImage import of PipeWire DMA-BUF planes
+tests/
+  test_cadence.cpp 184L 7 scenario tests (3:2, 2:2, passthrough, damage-
+                        driven, jitter, cadence change, pause) via a small
+                        assert macro; no external framework
 ```
 
-No tests and no CI exist yet.
+### Build & test baseline (this environment, 2026-07-06)
 
-### Build & test baseline (this environment)
+- Ubuntu 24.04 container, g++ 13.3, cmake + ninja present.
+- Core-only (`-DLSFG_BUILD_APP=OFF`): **builds clean, `ctest` 1/1 passing.**
+- Full app: `libpipewire-0.3-dev` 1.0.5, `libportal-dev` 0.7.1,
+  `libvulkan-dev` 1.3.275 from apt; SDL3 still isn't packaged on 24.04, so
+  SDL 3.4.12 was built from the `sdl3-src` crates.io tarball (GitHub/libsdl
+  release downloads are blocked by this container's network policy; X11 dev
+  headers + `libxtst-dev` needed first) into a scratch prefix. With
+  `PKG_CONFIG_PATH` pointing there: **compiles and links clean, zero
+  warnings** (`-Wall -Wextra`); `--help` runs.
+- Runtime is untestable here (no display/portal/GPU) — unchanged from prior
+  passes. The Milestone 0 hardware question (is Crunchyroll-in-Firefox
+  capture black?) still needs a manual `--drm-test` run on a real desktop.
+- `glslang-tools` (GLSL→SPIR-V compiler) is packaged on Ubuntu 24.04 and
+  Fedora — relevant to increment 3 below.
 
-- Ubuntu 24.04 container. `libpipewire-0.3-dev`, `libportal-dev`,
-  `libvulkan-dev` installed from apt. SDL3 is not packaged on 24.04; built
-  minimal SDL 3.4.12 from source (from the `sdl3-src` crate tarball — GitHub
-  and libsdl.org are blocked by the network policy here) into a scratch
-  prefix and pointed `PKG_CONFIG_PATH` at it.
-- `cmake -B build -G Ninja && ninja -C build`: **compiles and links clean,
-  zero warnings** (`-Wall -Wextra`).
-- `./build/lsfg-cap --help` runs. Nothing else is runtime-testable in this
-  container (no display, portal, or GPU).
-- Tests: none exist → nothing to run. This is the gap Milestone 2 starts
-  closing: its core logic is pure and will land with unit tests.
+## Phase 2 — Milestone 3 groundwork: pacing + placeholder frame generation
 
-## Phase 2 — Milestone 2: duplicate detection + cadence recovery
-
-Why: a 60 Hz compositor repaints a 23.976 fps video on a 3:2 pulldown
-(frames repeat 3,2,3,2,…). Interpolating between *repaints* would blend
-identical frames; Milestone 3 needs the stream of *unique* frames and the
-recovered source cadence. Some compositors also deliver buffers only on
-damage — then duplicates never arrive and cadence must come from arrival
-times alone. Both cases are handled by one tracker fed
-`(timestamp, is_duplicate)` events.
+Why this scope: full Milestone 3 means running Lossless Scaling's shipped
+shaders, which requires a machine with a GPU and an owned copy of the game's
+assets — neither exists here, and integrating a shader chain we cannot
+execute once would be stacked, unverifiable work. What *can* be built and
+verified now is everything around that shader: the frame pacer (pure logic,
+unit-testable), the unique-frame history the interpolator reads, a working
+placeholder interpolator (GPU crossfade) behind a backend interface, and the
+wiring that makes `-m N` produce real generated output. When the LSFG shader
+chain lands, it slots into an already-proven pipeline as a second backend.
 
 ### Increments (each: build clean, tests green, commit)
 
-1. **Add cadence tracker with unit tests**
-   - `src/core/cadence.{hpp,cpp}`: `CadenceTracker`, pure std-only logic, no
-     Vulkan/PipeWire dependencies, single-threaded by contract (caller locks).
-   - Input: `addFrame(t_seconds, is_duplicate)`. Output `CadenceStats`:
-     estimated source fps, repeat-pattern label ("3:2", "2:2", "1:1",
-     "irregular"), duplicate ratio, lock flag, frame counts.
-   - Source fps from the mean unique-frame interval over a sliding window
-     (mean, not median — pulldown alternates 50 ms/33 ms intervals whose
-     *mean* is the true 41.7 ms); pattern from repeat run-lengths;
-     discontinuities (> 250 ms gap, i.e. pause/seek) reset the window.
-   - `tests/test_cadence.cpp` driven by CTest with a small assert macro —
-     no external framework (network policy here blocks FetchContent from
-     GitHub, and a header-only vendored framework is overkill at this size).
-     Cases: 23.976→60 Hz 3:2 pulldown, 30→60 2:2, 60→60 passthrough,
-     damage-driven sparse delivery (no duplicates), timestamp jitter,
-     mid-stream cadence change, pause/resume.
-   - CMake: `BUILD_TESTING` (standard CTest toggle) builds the test; a new
-     `LSFG_BUILD_APP` option (default **ON**, so normal builds are unchanged)
-     lets CI build/run the pure tests without SDL3/PipeWire/portal installed.
+1. **Add frame pacer core module with unit tests**
+   - `src/core/pacer.{hpp,cpp}`: `FramePacer`, pure std-only, single-threaded
+     by contract (like `CadenceTracker`).
+   - Input: `onUniqueFrame(t_seconds, seq)` for each unique captured frame,
+     plus multiplier N and the cadence lock flag. Query per display refresh:
+     `Decision decide(t_now)` → either *passthrough* (show newest frame) or
+     *interpolate* `{seq_prev, seq_next, phase ∈ (0,1)}`.
+   - Interpolating toward a frame requires already having it, so the pacer
+     schedules output one source interval behind capture; it reports that
+     added latency so the stats line can show it honestly.
+   - Falls back to passthrough whenever cadence is unlocked, the multiplier
+     is 1, or source frames stop arriving (pause) — output must degrade to
+     exactly today's behavior, never freeze.
+   - `tests/test_pacer.cpp` (same assert-macro style): 24 fps → 60 Hz at
+     ×2/×3/×4 (phases monotonic, every pair used, none skipped), unlock →
+     passthrough fallback, pause/resume, source-rate change, jitter.
 
-2. **Detect duplicate frames in the capture path**
-   - Grow the existing probe from 16×16/every-30th to 64×64/every frame and
-     keep the previous probe's pixels; a frame is a duplicate when the probe
-     bytes match within a small per-pixel tolerance. Rationale: a repeated
-     video frame yields a byte-identical compositor buffer, and the GPU
-     downscale is deterministic — false "unique" is impossible, and 4096
-     sample points make false "duplicate" unlikely for real motion.
-     Readback cost: 16 KiB/frame, negligible next to the existing full-frame
-     copy + fence wait.
-   - Luma probe (DRM test) reads from the same 64×64 buffer — behavior
-     preserved, just more samples.
-   - `Capture` feeds `(t_cap, is_dup)` into a mutex-guarded `CadenceTracker`
-     and exposes a `cadence()` snapshot.
-   - All frames (duplicates included) are still published to the pool —
-     passthrough behavior is unchanged. Withholding duplicates and the
-     one-frame re-timing buffer belong to Milestone 3, where the consumer
-     actually exists.
+2. **Keep the last two unique frames in the FramePool**
+   - Grow the pool from 3 to 4 slots so "previous", "latest", "being read"
+     and "being written" can coexist without ever blocking the writer
+     (same lease model, same invariant, one more slot).
+   - Add `acquirePair()` alongside `acquireRead()` (which is preserved
+     unchanged): returns the latest two published frames for interpolation.
+   - Capture publishes only *unique* frames once interpolation is active;
+     duplicates are still probed (cadence keeps updating) but not published.
+     With `-m 1` every frame is published exactly as today.
 
-3. **Wire cadence stats into the main loop**
-   - Extend the per-second stats line: `source ~23.98 fps (3:2, 60% dup)`.
-   - README: mark Milestone 2 implemented, document the mechanism.
+3. **Add a Vulkan interpolator with a crossfade backend**
+   - `src/vk/interpolate.{hpp,cpp}`: owns an intermediate VkImage and a
+     compute pipeline; `generate(prev, next, phase)` writes the in-between
+     frame; renderer blits it instead of the pool image when the pacer says
+     to interpolate. Designed as *the* backend seam: the future LSFG shader
+     chain implements the same generate() contract.
+   - `shaders/blend.comp` (GLSL): `mix(prev, next, phase)` — a crossfade.
+     Visibly soft on motion, but it exercises timing, layout transitions,
+     and pacing end-to-end with zero proprietary assets.
+   - Compiled at build time via `glslangValidator` (new app-build dependency;
+     packaged on Fedora and Ubuntu incl. CI runners; core-only builds don't
+     need it). No binary blobs committed.
 
-4. **(If push permissions allow) `.github/workflows/ci.yml`**
-   - ubuntu-latest, `cmake -DLSFG_BUILD_APP=OFF -DBUILD_TESTING=ON`,
-     build + `ctest` — runs the pure-logic tests on every push/PR without
-     needing SDL3/GPU. App builds stay validated locally until a
-     runner-compatible dep set exists.
+4. **Wire the multiplier through the main loop**
+   - `-m 2..4` activates the pacer + interpolator (default 1 = passthrough,
+     bit-exact today's path); stats line gains
+     `output 47.9 fps (x2 gen, +42 ms pacing)`.
+   - README: milestone table row for "3a — pacing + placeholder
+     interpolation"; document the crossfade placeholder and the new
+     glslang build dependency.
+
+5. **CI: add an app-build job**
+   - Now that the full dep set is proven reproducible on Ubuntu 24.04:
+     apt packages + SDL3 built from the official release tarball, cached
+     with `actions/cache` keyed on the SDL version (runners have open
+     network, unlike this container). Compile/link validation only — no
+     GPU runtime on runners. The existing core-tests job stays untouched
+     as the fast always-green signal.
 
 ### Explicitly out of scope for this pass
 
-- Milestone 3 (LSFG shader integration, actual interpolation).
-- Withholding duplicate frames from the pool / re-timing (Milestone 3).
-- The Milestone 0 hardware question — whether Crunchyroll-in-Firefox capture
-  is black — still needs a manual `--drm-test` run on a real desktop; no
-  code change here can answer it.
+- The real LSFG shader chain (`Lossless.dll` extraction à la lsfg-vk) —
+  needs owned Steam assets and a GPU to validate; lands as a second
+  interpolator backend in a later pass.
+- Config file (`~/.config/lsfg-cap/config.toml`) — roadmap, not blocking.
+- Runtime/visual validation — impossible in this container; increments are
+  verified by unit tests + clean builds, and the crossfade path needs a
+  desktop run (same caveat as Milestones 0–2).
 
 ### Risks
 
-- Damage-driven compositors deliver no duplicates; the tracker treats every
-  frame as unique and recovers cadence from arrival times — covered by a
-  dedicated test.
-- Overlays (cursor embedded in the stream, subtitles) make some "repeat"
-  frames genuinely differ; they'll read as unique. That is correct for
-  interpolation purposes (the screen content did change), it just loosens
-  the pattern lock — the tracker reports "irregular" rather than lying.
+- **Pool growth (3→4 slots) touches the concurrency invariant.** Mitigated:
+  the lease model is unchanged, the non-blocking-writer argument is the same
+  counting argument with one more slot, and `acquireRead()` behavior is
+  preserved for the passthrough path.
+- **Crossfade quality is poor on motion** — that's expected of a placeholder;
+  it's off by default (`-m 1`) and clearly labeled in README. The point is
+  proving pacing/latency plumbing, not visual quality.
+- **Interpolation adds one source interval of latency** (~42 ms at 24 fps),
+  on top of the existing pipeline delay; lipsync target (< 50 ms total) may
+  not hold while interpolating. Surfaced honestly in the stats line;
+  acceptable for a placeholder, revisit when the real backend lands.
+- **glslangValidator as a new build dep** could be missing on some distro;
+  it's checked at configure time with a clear error, and core builds/CI
+  tests never need it.
