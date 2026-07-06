@@ -1,10 +1,12 @@
 #include "capture.hpp"
+#include "core/pacer.hpp"
 #include "log.hpp"
 #include "options.hpp"
 #include "portal.hpp"
 #include "renderer.hpp"
 #include "vk/context.hpp"
 #include "vk/frame_pool.hpp"
+#include "vk/interpolate.hpp"
 
 #include <SDL3/SDL.h>
 #include <getopt.h>
@@ -28,7 +30,7 @@ static void printUsage() {
         "lsfg-cap - capture a window and re-present it (frame generation soon)\n"
         "\n"
         "usage: lsfg-cap [options]\n"
-        "  -m, --multiplier N       frame-gen multiplier (parsed; active in milestone 3)\n"
+        "  -m, --multiplier N       frame-gen multiplier: 2/3/4, 1 = passthrough\n"
         "  -f, --fullscreen         start fullscreen (F toggles at runtime)\n"
         "      --present-mode M     fifo (vsync, default) | mailbox | immediate\n"
         "      --drm-test           run the black-frame test and exit with a verdict\n"
@@ -39,7 +41,7 @@ static void printUsage() {
         "  -v, --verbose            debug logging\n"
         "  -h, --help               this text\n"
         "\n"
-        "keys: F fullscreen | Esc/Q quit\n");
+        "keys: F fullscreen | G toggle frame generation | Esc/Q quit\n");
 }
 
 static std::filesystem::path configDir() {
@@ -111,6 +113,19 @@ static int run(const Options& opts) {
     if (!renderer.init(ctx, pool))
         return 1;
 
+    // Frame generation: pacer decides what each refresh shows, the blend
+    // interpolator produces the in-betweens. The pacer is shared between
+    // the capture thread (arrivals) and the render loop (decisions).
+    FramePacer pacer;
+    std::mutex pacer_mutex;
+    pacer.setMultiplier(opts.multiplier);
+    vk::BlendInterpolator interp;
+    bool fg_available = interp.create(ctx);
+    if (fg_available)
+        renderer.setFrameGen(&pacer, &pacer_mutex, &interp);
+    else
+        logWarn(TAG, "interpolator setup failed - frame generation disabled");
+
     std::atomic<bool> session_closed{false};
     PortalSession portal;
     portal.on_closed = [&] { session_closed.store(true); };
@@ -132,6 +147,11 @@ static int run(const Options& opts) {
                     bool fs = (SDL_GetWindowFlags(ctx.window) &
                                SDL_WINDOW_FULLSCREEN) != 0;
                     SDL_SetWindowFullscreen(ctx.window, !fs);
+                } else if (ev.key.key == SDLK_G) {
+                    std::lock_guard lock(pacer_mutex);
+                    pacer.setEnabled(!pacer.enabled());
+                    logInfo(TAG, "frame generation %s",
+                            pacer.enabled() ? "on" : "off");
                 }
                 break;
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
@@ -160,13 +180,18 @@ static int run(const Options& opts) {
     saveRestoreToken(portal.restoreToken());
 
     Capture capture;
+    if (fg_available)
+        capture.setPacer(&pacer, &pacer_mutex);
     if (!capture.start(ctx, pool, portal.stream().pipewire_fd,
                        portal.stream().node_id, !opts.no_dmabuf))
         return 1;
 
-    logInfo(TAG, "passthrough running (multiplier %d requested; frame "
-                 "generation lands in milestone 3)",
-            opts.multiplier);
+    if (opts.multiplier > 1 && fg_available)
+        logInfo(TAG, "running with %dx frame generation (blend baseline; "
+                     "engages once the source cadence locks, G toggles)",
+                opts.multiplier);
+    else
+        logInfo(TAG, "passthrough running (multiplier %d)", opts.multiplier);
     if (opts.drm_test)
         logInfo(TAG, "DRM black-frame test: sampling for %.0f seconds - play "
                      "your protected video now",
@@ -174,12 +199,18 @@ static int run(const Options& opts) {
 
     double t_start = nowSeconds();
     double t_last_stats = t_start;
-    uint64_t last_cap_frames = 0, last_presented = 0;
+    uint64_t last_cap_frames = 0, last_presented = 0, last_generated = 0;
     bool verdict_logged = false;
 
     while (!g_quit.load()) {
         pumpEvents(renderer);
         portal.pump();
+        if (fg_available) {
+            // keep the pacer's view of the source cadence current
+            CadenceStats cs = capture.cadence();
+            std::lock_guard lock(pacer_mutex);
+            pacer.updateCadence(cs.source_fps, cs.locked);
+        }
         if (!renderer.drawFrame())
             break;
 
@@ -198,7 +229,13 @@ static int run(const Options& opts) {
             double dt = now - t_last_stats;
             uint64_t cf = capture.frameCount();
             uint64_t pf = renderer.presentedFrames();
+            uint64_t gf = renderer.generatedFrames();
             CadenceStats cs = capture.cadence();
+            char gen[40] = "";
+            if (gf != last_generated)
+                std::snprintf(gen, sizeof(gen), " (%.1f gen/s, %dx)",
+                              double(gf - last_generated) / dt,
+                              opts.multiplier);
             char source[64];
             if (cs.source_fps > 0.0)
                 std::snprintf(source, sizeof(source),
@@ -208,14 +245,15 @@ static int run(const Options& opts) {
             else
                 std::snprintf(source, sizeof(source), "measuring");
             logInfo(TAG,
-                    "capture %5.1f fps (%s) | source %s | present %5.1f fps | "
+                    "capture %5.1f fps (%s) | source %s | output %5.1f fps%s | "
                     "video delay %5.1f ms | luma last/max %.1f/%.1f",
                     double(cf - last_cap_frames) / dt,
                     capture.usingDmaBuf() ? "dmabuf" : "shm", source,
-                    double(pf - last_presented) / dt, renderer.latencyMs(),
+                    double(pf - last_presented) / dt, gen, renderer.latencyMs(),
                     capture.lastLuma(), capture.maxLuma());
             last_cap_frames = cf;
             last_presented = pf;
+            last_generated = gf;
             t_last_stats = now;
         }
 
@@ -252,7 +290,8 @@ static int run(const Options& opts) {
     }
 
     capture.stop();
-    renderer.destroy();
+    renderer.destroy(); // waits for the device to go idle
+    interp.destroy();
     pool.destroy();
     ctx.shutdown();
     return 0;

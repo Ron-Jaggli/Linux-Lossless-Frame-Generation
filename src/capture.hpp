@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/cadence.hpp"
+#include "core/pacer.hpp"
 #include "vk/dmabuf_import.hpp"
 
 #include <atomic>
@@ -35,6 +36,13 @@ public:
                uint32_t node_id, bool allow_dmabuf);
     void stop();
 
+    // Optional: feed unique-frame arrivals to the frame pacer (call before
+    // start). The mutex serializes pacer access with the render thread.
+    void setPacer(FramePacer* pacer, std::mutex* pacer_mutex) {
+        pacer_ = pacer;
+        pacer_mutex_ = pacer_mutex;
+    }
+
     // polled by the main thread
     uint64_t frameCount() const { return frames_.load(); }
     bool hasError() const { return error_flag_.load(); }
@@ -62,7 +70,9 @@ private:
                         bool probe);
     void recordProbeFromPool(VkCommandBuffer cmd, VkImage pool_img);
     bool submitAndWait(VkCommandBuffer cmd);
-    void readProbe(double t_frame);
+    // Consumes the pending probe readback: feeds cadence and luminance,
+    // and reports whether the frame duplicates the previous one.
+    bool readProbe(double t_frame);
     void fallbackToShm();
 
     std::vector<const spa_pod*> buildFormatParams(spa_pod_builder* b,
@@ -126,6 +136,10 @@ private:
     bool prev_probe_valid_ = false;
     CadenceTracker cadence_tracker_;
     mutable std::mutex cadence_mutex_;
+
+    // frame pacer (owned by main; shared with the render thread)
+    FramePacer* pacer_ = nullptr;
+    std::mutex* pacer_mutex_ = nullptr;
 };
 
 } // namespace lsfg

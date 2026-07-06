@@ -284,6 +284,10 @@ void Capture::handleFormatChanged(const spa_pod* param) {
         std::lock_guard lock(cadence_mutex_);
         cadence_tracker_.reset();
     }
+    if (pacer_) {
+        std::lock_guard lock(*pacer_mutex_);
+        pacer_->reset();
+    }
 
     clearImports();
 
@@ -404,9 +408,14 @@ void Capture::handleProcess() {
                     t_cap = pts_s;
             }
             uint64_t seq = frames_.fetch_add(1) + 1;
-            pool_->publish(idx, seq, t_cap);
-            if (probe_pending_)
-                readProbe(t_cap);
+            // The probe readback is fence-waited by now, so duplicate
+            // status is known before the frame is published.
+            bool duplicate = probe_pending_ ? readProbe(t_cap) : false;
+            pool_->publish(idx, seq, t_cap, !duplicate);
+            if (!duplicate && pacer_) {
+                std::lock_guard lock(*pacer_mutex_);
+                pacer_->onUniqueFrame(seq, t_cap);
+            }
         }
     }
     pw_stream_queue_buffer(stream_, last);
@@ -621,7 +630,7 @@ void Capture::recordProbeFromPool(VkCommandBuffer cmd, VkImage pool_img) {
     probe_pending_ = true;
 }
 
-void Capture::readProbe(double t_frame) {
+bool Capture::readProbe(double t_frame) {
     probe_pending_ = false;
     const auto* px = static_cast<const uint8_t*>(probe_map_);
 
@@ -658,6 +667,7 @@ void Capture::readProbe(double t_frame) {
     if (luma > prev)
         max_luma_.store(luma);
     luma_samples_.fetch_add(1);
+    return duplicate;
 }
 
 CadenceStats Capture::cadence() const {

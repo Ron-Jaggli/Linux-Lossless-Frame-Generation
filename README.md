@@ -11,7 +11,8 @@ desktop portal and presents an interpolated stream in its own window.
 ```
 PipeWire screencast (xdg-desktop-portal, DMA-BUF zero-copy w/ SHM fallback)
   → duplicate detection + cadence recovery        [milestone 2 ✓]
-  → LSFG frame interpolation 2x/3x/4x             [milestone 3]
+  → frame pacing + interpolation 2x/3x/4x         [milestone 3a ✓ blend baseline]
+  → LSFG shader chain replaces the blend          [milestone 3b]
   → Vulkan presentation window (SDL3)             [milestone 1 ✓]
 ```
 
@@ -22,10 +23,11 @@ PipeWire screencast (xdg-desktop-portal, DMA-BUF zero-copy w/ SHM fallback)
 | 0 — DRM black-frame test (`--drm-test`) | implemented, needs a run against Crunchyroll |
 | 1 — capture → display passthrough | implemented |
 | 2 — duplicate detection + source cadence recovery | implemented |
-| 3 — LSFG shader integration, 2x interpolation | not started |
-| 4 — 3x/4x, cadence-locked interpolation, polish | not started |
+| 3a — frame pacing + 2x/3x/4x generation (linear-blend baseline) | implemented, needs desktop validation |
+| 3b — LSFG shader chain replaces the blend | not started |
+| 4 — polish, config file | not started |
 
-Milestone 3 will consume Lossless Scaling's shipped shaders the same way
+Milestone 3b will consume Lossless Scaling's shipped shaders the same way
 lsfg-vk does — **you must own Lossless Scaling on Steam**; no assets are
 bundled here.
 
@@ -55,13 +57,18 @@ On a machine without the app's dependencies, configure with
 ## Usage
 
 ```sh
-lsfg-cap                     # pick a window, passthrough at display refresh
+lsfg-cap                     # pick a window, 2x frame generation (default)
 lsfg-cap --drm-test          # milestone 0: is the capture black? (exit 2 = black)
-lsfg-cap -m 3 --fullscreen   # multiplier is parsed now, applied in milestone 3
+lsfg-cap -m 3 --fullscreen   # 3x generation; -m 1 = plain passthrough
 lsfg-cap --present-mode mailbox --no-dmabuf --verbose
 ```
 
-Keys: `F` fullscreen, `Esc`/`Q` quit.
+Keys: `F` fullscreen, `G` toggle frame generation, `Esc`/`Q` quit.
+
+Frame generation engages only while the cadence tracker is locked onto the
+source rate; until then (and whenever the pattern breaks — seeks, pauses,
+overlays) it falls back to passthrough, so it is never worse than not
+having it on.
 
 The portal window picker appears on first run; the grant is remembered via a
 portal restore token (`~/.config/lsfg-cap/restore_token`), so later runs
@@ -111,13 +118,24 @@ building on it.
   repeat pattern (e.g. `23.98 fps (3:2)` for film in a 60 Hz browser), also
   handling damage-driven compositors that never deliver duplicates. Shown in
   the stats line; milestone 3 consumes it to interpolate only unique frames.
+- **Frame pacing + interpolation (milestone 3a):** a pure, unit-tested
+  `FramePacer` decides at every display refresh what to show: the latest
+  real frame, or the last two unique frames blended at a phase quantized to
+  1/multiplier. When unique frame B arrives, the A→B interval is presented
+  over the *next* source period — a one-source-period hold that is inherent
+  to interpolation (~42 ms at 24 fps source, measured and shown in the
+  stats line as part of video delay; on some setups this exceeds the 50 ms
+  lipsync target). The current interpolator is a **linear blend** — cheap,
+  and visibly ghosty on fast motion; it exists to prove the pipeline
+  (pairing, pacing, extra GPU pass, present timing) so the LSFG shader
+  chain can drop in behind the same `Interpolator` interface in 3b.
 - **Edge cases:** source resize renegotiates and rebuilds the pool; stream
   errors/session-close are detected and reported; corrupted chunks skipped;
   black frames detected by the same probe's mean luminance.
 
 ## Roadmap details
 
-- **Milestone 3:** LSFG shader chain lifted per lsfg-vk's approach, reading
+- **Milestone 3b:** LSFG shader chain lifted per lsfg-vk's approach, reading
   `Lossless.dll` from your Steam library (path autodetected from lsfg-vk's
   config when present).
 - **Config file** (`~/.config/lsfg-cap/config.toml`) for defaults; GUI later.
