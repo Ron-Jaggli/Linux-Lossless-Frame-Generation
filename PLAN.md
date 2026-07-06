@@ -9,9 +9,20 @@
   window) were implemented on `claude/wizardly-clarke-4fk1ip`.
 - **2026-07-05 (evening):** Milestone 2 (duplicate detection + cadence
   recovery, unit tests, CI) implemented and merged as PR #2.
-- **2026-07-06 (this pass):** fresh recon of the milestone-2 codebase,
+- **2026-07-06 (morning):** fresh recon of the milestone-2 codebase,
   recorded below, plus the plan for the next increment: the interpolation
-  engine scaffolding for Milestone 3.
+  engine scaffolding for Milestone 3. Reviewed and merged as PR #3.
+- **2026-07-06 (this pass):** the milestone-3a plan below was approved via
+  the PR #3 merge; this pass re-verified the Phase 1 baseline in a fresh
+  container (core `ctest` 1/1 green; app compiles and links against apt
+  pipewire/portal/vulkan plus a scratch console-only SDL 3.4.12 built from
+  the crates.io `sdl3-src` tarball; `glslangValidator` 15.1 available for
+  the shader increment) and then executed increments 1-4. One deviation
+  found during implementation, noted inline below: the frame pool needs
+  **6** slots, not 5 — the plan's arithmetic missed that `latest_` can be
+  a *duplicate* frame occupying its own slot distinct from the two current
+  uniques (pair held by reader: 2, current uniques: 2, duplicate latest: 1
+  → 5 excluded, so a 6th slot is required for the writer to never block).
 
 ## Phase 1 recon — current state (2026-07-06)
 
