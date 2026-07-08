@@ -85,6 +85,15 @@ are unchanged and cannot be answered from a container:
 
 ## Phase 2 — Milestone 3a: interpolation engine scaffolding
 
+**Status (2026-07-08): implemented.** All five increments below landed as
+individual commits on `claude/wizardly-clarke-8r6dim`; core tests (cadence +
+new pacer suite) green, full app compiles and links. Deviations from the
+plan as written: the pool grew to 6 slots (see History) rather than 5, the
+`G` runtime toggle simply forces multiplier 1 rather than a separate flag,
+and `--drm-test` forces passthrough so the verdict measures the raw
+capture. Runtime validation on real hardware (GPU + portal) is the
+remaining step, as anticipated.
+
 Milestone 3 as originally scoped ("lift the LSFG shader chain from
 Lossless.dll the way lsfg-vk does") has two hard external dependencies:
 the user-owned `Lossless.dll` and a real GPU to validate against — neither
