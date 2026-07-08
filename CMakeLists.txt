@@ -37,6 +37,7 @@ if(LSFG_BUILD_APP)
         src/vk/context.cpp
         src/vk/frame_pool.cpp
         src/vk/dmabuf_import.cpp
+        src/vk/interpolate.cpp
     )
 
     target_compile_options(lsfg-cap PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
