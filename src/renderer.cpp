@@ -3,6 +3,7 @@
 #include "log.hpp"
 #include "vk/context.hpp"
 #include "vk/frame_pool.hpp"
+#include "vk/interpolate.hpp"
 
 #include <algorithm>
 #include <mutex>
@@ -34,6 +35,13 @@ bool Renderer::init(vk::Context& ctx, vk::FramePool& pool) {
         vkCreateSemaphore(ctx.device, &sci, nullptr, &sem_render_) != VK_SUCCESS)
         return false;
     return true;
+}
+
+void Renderer::enableFrameGen(FramePacer& pacer, std::mutex& pacer_mutex,
+                              vk::Interpolator& interp) {
+    pacer_ = &pacer;
+    pacer_mutex_ = &pacer_mutex;
+    interp_ = &interp;
 }
 
 void Renderer::destroy() {
@@ -77,11 +85,60 @@ bool Renderer::drawFrame() {
         return false;
     }
 
-    auto lease = pool_->acquireRead();
+    PaceDecision decision;
+    decision.mode = PaceDecision::Mode::Passthrough;
+    if (pacer_) {
+        std::lock_guard lock(*pacer_mutex_);
+        decision = pacer_->decide(nowSeconds());
+    }
+
+    // Interpolation needs the unique pair; anything else shows the latest
+    // real frame. An unavailable pair (startup, pool just recreated) falls
+    // back to passthrough for this refresh.
+    vk::FramePool::PairLease pair;
+    vk::FramePool::ReadLease lease;
+    bool interpolating = false;
+    if (decision.mode == PaceDecision::Mode::Interpolate && interp_) {
+        pair = pool_->acquirePairRead();
+        interpolating = pair.index_b >= 0;
+    }
+    if (!interpolating)
+        lease = pool_->acquireRead();
+
+    auto releaseLeases = [&] {
+        if (interpolating)
+            pool_->releasePairRead(pair);
+        else
+            pool_->releaseRead(lease);
+    };
 
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd_, &bi);
+
+    // Pick the blit source: pool frame, exact pair frame A (step 0 needs no
+    // compute), or the interpolator's output.
+    VkImage src = VK_NULL_HANDLE;
+    uint32_t src_w = 0, src_h = 0;
+    double t_content = 0.0;
+    if (interpolating) {
+        src_w = pair.width;
+        src_h = pair.height;
+        t_content = pair.t_capture_a +
+                    decision.phase * (pair.t_capture_b - pair.t_capture_a);
+        if (decision.step == 0) {
+            src = pair.image_a;
+        } else if (interp_->record(cmd_, pair, float(decision.phase))) {
+            src = interp_->result();
+        } else {
+            src = pair.image_b; // resource failure: newest real frame
+        }
+    } else if (lease.index >= 0) {
+        src = lease.image;
+        src_w = lease.width;
+        src_h = lease.height;
+        t_content = lease.t_capture;
+    }
 
     VkImage swap_img = ctx_->swap_images[image_index];
     VkImageMemoryBarrier to_dst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -102,22 +159,22 @@ bool Renderer::drawFrame() {
     vkCmdClearColorImage(cmd_, swap_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                          &clear, 1, &range);
 
-    if (lease.index >= 0) {
+    if (src != VK_NULL_HANDLE) {
         // letterboxed fit
         double sw = ctx_->swap_extent.width, sh = ctx_->swap_extent.height;
-        double scale = std::min(sw / lease.width, sh / lease.height);
-        int32_t dw = int32_t(lease.width * scale);
-        int32_t dh = int32_t(lease.height * scale);
+        double scale = std::min(sw / src_w, sh / src_h);
+        int32_t dw = int32_t(src_w * scale);
+        int32_t dh = int32_t(src_h * scale);
         int32_t dx = (int32_t(sw) - dw) / 2;
         int32_t dy = (int32_t(sh) - dh) / 2;
 
         VkImageBlit blit{};
         blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        blit.srcOffsets[1] = {int32_t(lease.width), int32_t(lease.height), 1};
+        blit.srcOffsets[1] = {int32_t(src_w), int32_t(src_h), 1};
         blit.dstSubresource = blit.srcSubresource;
         blit.dstOffsets[0] = {dx, dy, 0};
         blit.dstOffsets[1] = {dx + dw, dy + dh, 1};
-        vkCmdBlitImage(cmd_, lease.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        vkCmdBlitImage(cmd_, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        swap_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                        VK_FILTER_LINEAR);
     }
@@ -145,15 +202,16 @@ bool Renderer::drawFrame() {
         std::lock_guard lock(ctx_->queue_mutex);
         if (vkQueueSubmit(ctx_->queue, 1, &si, fence_) != VK_SUCCESS) {
             logError(TAG, "vkQueueSubmit failed");
-            pool_->releaseRead(lease);
+            releaseLeases();
             return false;
         }
     }
-    // Wait for the blit before releasing the pool lease; keeps capture-side
-    // recreation safe. Cheap at passthrough workloads.
+    // Wait for the GPU work before releasing the pool lease(s); keeps
+    // capture-side recreation safe and the interpolator's per-frame
+    // resources idle for the next record.
     vkWaitForFences(ctx_->device, 1, &fence_, VK_TRUE, UINT64_MAX);
     vkResetFences(ctx_->device, 1, &fence_);
-    pool_->releaseRead(lease);
+    releaseLeases();
 
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
@@ -173,8 +231,22 @@ bool Renderer::drawFrame() {
     }
 
     presented_++;
-    if (lease.index >= 0) {
-        double lat = (nowSeconds() - lease.t_capture) * 1000.0;
+    if (src != VK_NULL_HANDLE) {
+        uint64_t seq_a = interpolating ? pair.seq_a : lease.seq;
+        uint64_t seq_b = interpolating ? pair.seq_b : lease.seq;
+        int step = interpolating ? decision.step : 0;
+        bool same = have_last_shown_ && interpolating == last_was_interp_ &&
+                    seq_a == last_seq_a_ && seq_b == last_seq_b_ &&
+                    step == last_step_;
+        if (!same)
+            outputs_++;
+        have_last_shown_ = true;
+        last_was_interp_ = interpolating;
+        last_seq_a_ = seq_a;
+        last_seq_b_ = seq_b;
+        last_step_ = step;
+
+        double lat = (nowSeconds() - t_content) * 1000.0;
         latency_ms_ = latency_ms_ < 0 ? lat : latency_ms_ * 0.9 + lat * 0.1;
     }
     return true;

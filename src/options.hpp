@@ -6,7 +6,7 @@
 namespace lsfg {
 
 struct Options {
-    int multiplier = 2;          // frame-gen multiplier (unused until milestone 3)
+    int multiplier = 2;          // frame-gen multiplier, 1-4 (1 = passthrough)
     bool fullscreen = false;
     std::string present_mode = "fifo"; // fifo | mailbox | immediate
     bool drm_test = false;       // capture, measure brightness, report, exit

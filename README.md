@@ -11,7 +11,7 @@ desktop portal and presents an interpolated stream in its own window.
 ```
 PipeWire screencast (xdg-desktop-portal, DMA-BUF zero-copy w/ SHM fallback)
   → duplicate detection + cadence recovery        [milestone 2 ✓]
-  → LSFG frame interpolation 2x/3x/4x             [milestone 3]
+  → frame interpolation 2x/3x/4x                  [milestone 3a ✓ blend baseline]
   → Vulkan presentation window (SDL3)             [milestone 1 ✓]
 ```
 
@@ -22,10 +22,11 @@ PipeWire screencast (xdg-desktop-portal, DMA-BUF zero-copy w/ SHM fallback)
 | 0 — DRM black-frame test (`--drm-test`) | implemented, needs a run against Crunchyroll |
 | 1 — capture → display passthrough | implemented |
 | 2 — duplicate detection + source cadence recovery | implemented |
-| 3 — LSFG shader integration, 2x interpolation | not started |
-| 4 — 3x/4x, cadence-locked interpolation, polish | not started |
+| 3a — frame-gen engine (pacer, pair leases, blend interpolator, 2x/3x/4x) | implemented, needs a run on real hardware |
+| 3b — LSFG shader integration (replaces the blend) | not started |
+| 4 — cadence-locked interpolation, polish | not started |
 
-Milestone 3 will consume Lossless Scaling's shipped shaders the same way
+Milestone 3b will consume Lossless Scaling's shipped shaders the same way
 lsfg-vk does — **you must own Lossless Scaling on Steam**; no assets are
 bundled here.
 
@@ -55,13 +56,29 @@ On a machine without the app's dependencies, configure with
 ## Usage
 
 ```sh
-lsfg-cap                     # pick a window, passthrough at display refresh
+lsfg-cap                     # pick a window, 2x frame generation (default)
 lsfg-cap --drm-test          # milestone 0: is the capture black? (exit 2 = black)
-lsfg-cap -m 3 --fullscreen   # multiplier is parsed now, applied in milestone 3
+lsfg-cap -m 3 --fullscreen   # 3x: two generated frames between real ones
+lsfg-cap -m 1                # plain passthrough, no interpolation
 lsfg-cap --present-mode mailbox --no-dmabuf --verbose
 ```
 
-Keys: `F` fullscreen, `Esc`/`Q` quit.
+Keys: `F` fullscreen, `G` toggle frame generation, `Esc`/`Q` quit.
+
+Frame generation engages once the cadence tracker locks onto the source
+rate (a few seconds of playback) and drops back to passthrough on pause,
+seek, or an irregular source — never worse than the plain capture. The
+stats line shows the effective rate, e.g. `output 47.9 fps (2x)` for a
+24 fps source.
+
+**Interpolation quality/latency (milestone 3a honesty):** the current
+interpolator is a plain linear blend — crossfade, not motion — so fast pans
+show ghosting; it exists to run the full engine end-to-end before the LSFG
+shader chain replaces it (milestone 3b, same interface). Interpolating also
+inherently delays video by one source period (~42 ms at 24 fps) because A→B
+in-betweens can only be shown once B exists. That is measured and included
+in the stats line's video-delay figure; on some setups it will exceed the
+50 ms lipsync target, which is a known trade to tune later.
 
 The portal window picker appears on first run; the grant is remembered via a
 portal restore token (`~/.config/lsfg-cap/restore_token`), so later runs
@@ -111,14 +128,21 @@ I am using waterfox so like if you do run into problems then use chrome or water
   turns the (timestamp, duplicate) stream into the recovered source rate and
   repeat pattern (e.g. `23.98 fps (3:2)` for film in a 60 Hz browser), also
   handling damage-driven compositors that never deliver duplicates. Shown in
-  the stats line; milestone 3 consumes it to interpolate only unique frames.
+  the stats line; the frame-gen engine interpolates only unique frames.
+- **Frame generation (milestone 3a):** a pure, unit-tested `FramePacer`
+  decides at every display refresh whether to show the latest real frame or
+  a quantized `(A, B, phase)` in-between of the two newest unique frames,
+  which the pool hands out as a pair lease; a pluggable `Interpolator`
+  (currently the linear-blend compute pass) renders it. Engages only under
+  cadence lock with multiplier ≥ 2, so every fallback path is byte-identical
+  to plain passthrough.
 - **Edge cases:** source resize renegotiates and rebuilds the pool; stream
   errors/session-close are detected and reported; corrupted chunks skipped;
   black frames detected by the same probe's mean luminance.
 
 ## Roadmap details
 
-- **Milestone 3:** LSFG shader chain lifted per lsfg-vk's approach, reading
+- **Milestone 3b:** LSFG shader chain lifted per lsfg-vk's approach, reading
   `Lossless.dll` from your Steam library (path autodetected from lsfg-vk's
   config when present).
 - **Config file** (`~/.config/lsfg-cap/config.toml`) for defaults; GUI later.
