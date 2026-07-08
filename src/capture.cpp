@@ -284,6 +284,10 @@ void Capture::handleFormatChanged(const spa_pod* param) {
         std::lock_guard lock(cadence_mutex_);
         cadence_tracker_.reset();
     }
+    if (pacer_) {
+        std::lock_guard lock(*pacer_mutex_);
+        pacer_->reset();
+    }
 
     clearImports();
 
@@ -408,6 +412,17 @@ void Capture::handleProcess() {
             bool duplicate = probe_pending_ && readProbe(t_cap);
             uint64_t seq = frames_.fetch_add(1) + 1;
             pool_->publish(idx, seq, t_cap, !duplicate);
+            if (pacer_) {
+                CadenceStats cs;
+                {
+                    std::lock_guard lock(cadence_mutex_);
+                    cs = cadence_tracker_.stats();
+                }
+                std::lock_guard lock(*pacer_mutex_);
+                if (!duplicate)
+                    pacer_->onUniqueFrame(seq, t_cap);
+                pacer_->setCadence(cs.source_fps, cs.locked);
+            }
         }
     }
     pw_stream_queue_buffer(stream_, last);

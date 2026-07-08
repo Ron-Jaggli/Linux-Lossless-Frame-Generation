@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 
 namespace lsfg {
@@ -25,10 +26,10 @@ static void onSignal(int) { g_quit.store(true); }
 
 static void printUsage() {
     std::printf(
-        "lsfg-cap - capture a window and re-present it (frame generation soon)\n"
+        "lsfg-cap - capture a window and re-present it with frame generation\n"
         "\n"
         "usage: lsfg-cap [options]\n"
-        "  -m, --multiplier N       frame-gen multiplier (parsed; active in milestone 3)\n"
+        "  -m, --multiplier N       frame-gen multiplier 1-4 (1 = passthrough)\n"
         "  -f, --fullscreen         start fullscreen (F toggles at runtime)\n"
         "      --present-mode M     fifo (vsync, default) | mailbox | immediate\n"
         "      --drm-test           run the black-frame test and exit with a verdict\n"
@@ -39,7 +40,7 @@ static void printUsage() {
         "  -v, --verbose            debug logging\n"
         "  -h, --help               this text\n"
         "\n"
-        "keys: F fullscreen | Esc/Q quit\n");
+        "keys: F fullscreen | G toggle frame generation | Esc/Q quit\n");
 }
 
 static std::filesystem::path configDir() {
@@ -111,6 +112,13 @@ static int run(const Options& opts) {
     if (!renderer.init(ctx, pool))
         return 1;
 
+    // The pacer is fed by the capture thread and consulted by the render
+    // loop; both sides go through pacer_mutex.
+    FramePacer pacer;
+    std::mutex pacer_mutex;
+    pacer.setMultiplier(opts.multiplier);
+    renderer.enableFrameGen(&pacer, &pacer_mutex);
+
     std::atomic<bool> session_closed{false};
     PortalSession portal;
     portal.on_closed = [&] { session_closed.store(true); };
@@ -132,6 +140,10 @@ static int run(const Options& opts) {
                     bool fs = (SDL_GetWindowFlags(ctx.window) &
                                SDL_WINDOW_FULLSCREEN) != 0;
                     SDL_SetWindowFullscreen(ctx.window, !fs);
+                } else if (ev.key.key == SDLK_G) {
+                    r.setFrameGenEnabled(!r.frameGenEnabled());
+                    logInfo(TAG, "frame generation %s",
+                            r.frameGenEnabled() ? "enabled" : "disabled");
                 }
                 break;
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
@@ -160,13 +172,17 @@ static int run(const Options& opts) {
     saveRestoreToken(portal.restoreToken());
 
     Capture capture;
+    capture.setPacer(&pacer, &pacer_mutex);
     if (!capture.start(ctx, pool, portal.stream().pipewire_fd,
                        portal.stream().node_id, !opts.no_dmabuf))
         return 1;
 
-    logInfo(TAG, "passthrough running (multiplier %d requested; frame "
-                 "generation lands in milestone 3)",
-            opts.multiplier);
+    if (pacer.multiplier() > 1)
+        logInfo(TAG, "frame generation %dx (linear blend baseline); "
+                     "interpolation starts once the source cadence locks",
+                pacer.multiplier());
+    else
+        logInfo(TAG, "passthrough running (multiplier 1)");
     if (opts.drm_test)
         logInfo(TAG, "DRM black-frame test: sampling for %.0f seconds - play "
                      "your protected video now",
@@ -174,7 +190,7 @@ static int run(const Options& opts) {
 
     double t_start = nowSeconds();
     double t_last_stats = t_start;
-    uint64_t last_cap_frames = 0, last_presented = 0;
+    uint64_t last_cap_frames = 0, last_presented = 0, last_interp = 0;
     bool verdict_logged = false;
 
     while (!g_quit.load()) {
@@ -198,6 +214,7 @@ static int run(const Options& opts) {
             double dt = now - t_last_stats;
             uint64_t cf = capture.frameCount();
             uint64_t pf = renderer.presentedFrames();
+            uint64_t inf = renderer.interpolatedFrames();
             CadenceStats cs = capture.cadence();
             char source[64];
             if (cs.source_fps > 0.0)
@@ -207,15 +224,21 @@ static int run(const Options& opts) {
                               cs.dup_ratio * 100.0);
             else
                 std::snprintf(source, sizeof(source), "measuring");
+            char gen[32] = "";
+            if (inf > last_interp)
+                std::snprintf(gen, sizeof(gen), " (%dx gen, %.0f interp)",
+                              pacer.multiplier(),
+                              double(inf - last_interp) / dt);
             logInfo(TAG,
-                    "capture %5.1f fps (%s) | source %s | present %5.1f fps | "
+                    "capture %5.1f fps (%s) | source %s | output %5.1f fps%s | "
                     "video delay %5.1f ms | luma last/max %.1f/%.1f",
                     double(cf - last_cap_frames) / dt,
                     capture.usingDmaBuf() ? "dmabuf" : "shm", source,
-                    double(pf - last_presented) / dt, renderer.latencyMs(),
+                    double(pf - last_presented) / dt, gen, renderer.latencyMs(),
                     capture.lastLuma(), capture.maxLuma());
             last_cap_frames = cf;
             last_presented = pf;
+            last_interp = inf;
             t_last_stats = now;
         }
 

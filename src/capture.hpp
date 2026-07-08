@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/cadence.hpp"
+#include "core/pacer.hpp"
 #include "vk/dmabuf_import.hpp"
 
 #include <atomic>
@@ -34,6 +35,14 @@ public:
     bool start(vk::Context& ctx, vk::FramePool& pool, int pipewire_fd,
                uint32_t node_id, bool allow_dmabuf);
     void stop();
+
+    // Optional: feed unique-frame arrivals and cadence updates to the frame
+    // pacer, which the render thread also reads; accesses are serialized by
+    // pacer_mutex. Set before start().
+    void setPacer(FramePacer* pacer, std::mutex* pacer_mutex) {
+        pacer_ = pacer;
+        pacer_mutex_ = pacer_mutex;
+    }
 
     // polled by the main thread
     uint64_t frameCount() const { return frames_.load(); }
@@ -128,6 +137,10 @@ private:
     bool prev_probe_valid_ = false;
     CadenceTracker cadence_tracker_;
     mutable std::mutex cadence_mutex_;
+
+    // frame pacer shared with the render thread (owned by main)
+    FramePacer* pacer_ = nullptr;
+    std::mutex* pacer_mutex_ = nullptr;
 };
 
 } // namespace lsfg
