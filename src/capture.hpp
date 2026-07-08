@@ -62,7 +62,9 @@ private:
                         bool probe);
     void recordProbeFromPool(VkCommandBuffer cmd, VkImage pool_img);
     bool submitAndWait(VkCommandBuffer cmd);
-    void readProbe(double t_frame);
+    // Reads the probe, feeds cadence/luma, returns whether the frame is a
+    // duplicate of the previous one.
+    bool readProbe(double t_frame);
     void fallbackToShm();
 
     std::vector<const spa_pod*> buildFormatParams(spa_pod_builder* b,
