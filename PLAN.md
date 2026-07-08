@@ -9,11 +9,16 @@
   window) were implemented on `claude/wizardly-clarke-4fk1ip`.
 - **2026-07-05 (evening):** Milestone 2 (duplicate detection + cadence
   recovery, unit tests, CI) implemented and merged as PR #2.
-- **2026-07-06 (this pass):** fresh recon of the milestone-2 codebase,
-  recorded below, plus the plan for the next increment: the interpolation
-  engine scaffolding for Milestone 3.
+- **2026-07-06:** fresh recon of the milestone-2 codebase plus the plan for
+  the interpolation engine scaffolding (Milestone 3a); merged as PR #3.
+  **The plan merged but none of its code was implemented** — no pacer, no
+  pair leases, no interpolator exist in the tree.
+- **2026-07-08 (this pass):** re-recon and baseline re-verification, recorded
+  below. The Milestone 3a plan was re-validated against the actual code (one
+  correction found, noted in increment 2) and stands as the plan for this
+  pass's Phase 2.
 
-## Phase 1 recon — current state (2026-07-06)
+## Phase 1 recon — current state (2026-07-08)
 
 ### Module map
 
@@ -50,20 +55,24 @@ tests/test_cadence.cpp   7 scenario tests (3:2, 2:2, passthrough, damage-
                          assert harness, no external framework
 ```
 
-### Build & test baseline (this environment, fresh container)
+### Build & test baseline (this environment, fresh container, 2026-07-08)
 
-- Ubuntu 24.04 container, cmake 3.28 / ninja / g++ 13. Installed
-  `libpipewire-0.3-dev libportal-dev libvulkan-dev` from apt; SDL3 is still
-  not packaged on 24.04, so a minimal console-only SDL 3.4.12 was built from
-  the `sdl3-src` crate tarball (crates.io is reachable; GitHub is not) into a
-  scratch prefix for compile/link validation.
+- Ubuntu 24.04 container, cmake 3.28.3 / ninja / g++ 13.3. Installed
+  `libpipewire-0.3-dev libportal-dev libvulkan-dev glslang-tools` from apt;
+  SDL3 is still not packaged on 24.04, so a minimal SDL 3.2.16 (audio/
+  joystick/camera/etc. disabled) was built from the `sdl3-src` crate tarball
+  (crates.io is reachable; GitHub release downloads are not) into a scratch
+  prefix for compile/link validation.
 - Core: `cmake -B build-core -G Ninja -DLSFG_BUILD_APP=OFF` → builds clean,
-  `ctest` **1/1 passed** (the cadence suite).
-- App: compiles and links clean against the scratch SDL3 (see baseline note
-  in the commit that accompanies this plan). Nothing app-side is runtime
-  testable here: no display, no portal, no GPU. Runtime behavior is
-  validated on the owner's desktop.
-- CI (core tests only) is green on `main`.
+  `ctest` **1/1 passed** (the cadence suite, 7 scenarios).
+- App: full `lsfg-cap` target compiles and links clean against the scratch
+  SDL3 with `-Wall -Wextra`. Nothing app-side is runtime-testable here: no
+  display, no portal, no GPU. Runtime behavior is validated on the owner's
+  desktop.
+- `glslangValidator` 15.1 is available, so the milestone-3a compute shader
+  can be compiled to SPIR-V and committed as a generated header from here.
+- CI (core tests only) is green on `main`. Nothing is broken; the baseline
+  is fully green.
 
 ### Where the project stands
 
@@ -119,8 +128,14 @@ matter of implementing one interface on real hardware:
      unlocked, pause/resume, source-rate drift, phase monotonicity and
      output-rate ≈ m × source fps.
 2. **Frame pool: unique-frame pair leases**
-   - `publish()` gains a `unique` flag (capture already knows duplicate
-     status at publish time from the probe compare).
+   - `publish()` gains a `unique` flag. Correction from re-recon: today the
+     capture callback publishes first and resolves the probe compare one
+     line later (`capture.cpp` `onProcess`: `publish()` then `readProbe()`),
+     so duplicate status is *not* yet known at publish time — but the GPU
+     work is already fence-waited by then (`submitAndWait` inside
+     `processDmaBuf`/`processShm`), so `readProbe()` can safely move before
+     `publish()` with no synchronization change. That reorder is part of
+     this increment.
    - New `acquirePairRead()` → the two most recent unique frames (A, B) with
      their capture timestamps; slot count grows from 3 to 5 so the writer
      still never blocks while a reader holds a pair. Existing single-frame
