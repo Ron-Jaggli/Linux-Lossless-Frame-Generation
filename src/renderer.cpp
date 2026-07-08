@@ -3,6 +3,7 @@
 #include "log.hpp"
 #include "vk/context.hpp"
 #include "vk/frame_pool.hpp"
+#include "vk/interpolate.hpp"
 
 #include <algorithm>
 #include <mutex>
@@ -77,11 +78,59 @@ bool Renderer::drawFrame() {
         return false;
     }
 
-    auto lease = pool_->acquireRead();
+    // What to show this refresh: an interpolated in-between when the pacer
+    // asks for one and the pool's pair still matches the decision (the pair
+    // can advance between the decision and the lease — fall back to the
+    // latest real frame for that one refresh), else passthrough.
+    PaceDecision decision;
+    if (pace_source_ && interp_)
+        decision = pace_source_(nowSeconds());
+    vk::FramePool::PairLease pair;
+    vk::FramePool::ReadLease lease;
+    if (decision.interpolate) {
+        pair = pool_->acquirePairRead();
+        if (pair.valid() && (pair.a.seq != decision.seq_a ||
+                             pair.b.seq != decision.seq_b)) {
+            pool_->releasePairRead(pair);
+            pair = {};
+        }
+    }
+    if (!pair.valid())
+        lease = pool_->acquireRead();
 
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd_, &bi);
+
+    // Source of this refresh's blit and the timestamp of its content.
+    VkImage src_image = lease.image;
+    uint32_t src_width = lease.width, src_height = lease.height;
+    double content_t = lease.t_capture;
+    bool have_src = lease.index >= 0;
+    bool src_generated = false;
+    if (pair.valid()) {
+        have_src = true;
+        src_width = pair.b.width;
+        src_height = pair.b.height;
+        if (decision.phase <= 0.0) {
+            // step 0 of the schedule is frame A itself; no compute needed
+            src_image = pair.a.image;
+            content_t = pair.a.t_capture;
+        } else {
+            src_image = interp_->record(cmd_, pair.a.image, pair.b.image,
+                                        pool_->format(), src_width, src_height,
+                                        float(decision.phase));
+            if (src_image) {
+                src_generated = true;
+                content_t = pair.a.t_capture +
+                            decision.phase *
+                                (pair.b.t_capture - pair.a.t_capture);
+            } else {
+                src_image = pair.b.image; // interpolator failed; show latest
+                content_t = pair.b.t_capture;
+            }
+        }
+    }
 
     VkImage swap_img = ctx_->swap_images[image_index];
     VkImageMemoryBarrier to_dst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -102,22 +151,22 @@ bool Renderer::drawFrame() {
     vkCmdClearColorImage(cmd_, swap_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                          &clear, 1, &range);
 
-    if (lease.index >= 0) {
+    if (have_src) {
         // letterboxed fit
         double sw = ctx_->swap_extent.width, sh = ctx_->swap_extent.height;
-        double scale = std::min(sw / lease.width, sh / lease.height);
-        int32_t dw = int32_t(lease.width * scale);
-        int32_t dh = int32_t(lease.height * scale);
+        double scale = std::min(sw / src_width, sh / src_height);
+        int32_t dw = int32_t(src_width * scale);
+        int32_t dh = int32_t(src_height * scale);
         int32_t dx = (int32_t(sw) - dw) / 2;
         int32_t dy = (int32_t(sh) - dh) / 2;
 
         VkImageBlit blit{};
         blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        blit.srcOffsets[1] = {int32_t(lease.width), int32_t(lease.height), 1};
+        blit.srcOffsets[1] = {int32_t(src_width), int32_t(src_height), 1};
         blit.dstSubresource = blit.srcSubresource;
         blit.dstOffsets[0] = {dx, dy, 0};
         blit.dstOffsets[1] = {dx + dw, dy + dh, 1};
-        vkCmdBlitImage(cmd_, lease.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        vkCmdBlitImage(cmd_, src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        swap_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                        VK_FILTER_LINEAR);
     }
@@ -146,6 +195,7 @@ bool Renderer::drawFrame() {
         if (vkQueueSubmit(ctx_->queue, 1, &si, fence_) != VK_SUCCESS) {
             logError(TAG, "vkQueueSubmit failed");
             pool_->releaseRead(lease);
+            pool_->releasePairRead(pair);
             return false;
         }
     }
@@ -154,6 +204,7 @@ bool Renderer::drawFrame() {
     vkWaitForFences(ctx_->device, 1, &fence_, VK_TRUE, UINT64_MAX);
     vkResetFences(ctx_->device, 1, &fence_);
     pool_->releaseRead(lease);
+    pool_->releasePairRead(pair);
 
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
@@ -173,8 +224,10 @@ bool Renderer::drawFrame() {
     }
 
     presented_++;
-    if (lease.index >= 0) {
-        double lat = (nowSeconds() - lease.t_capture) * 1000.0;
+    if (src_generated)
+        generated_++;
+    if (have_src) {
+        double lat = (nowSeconds() - content_t) * 1000.0;
         latency_ms_ = latency_ms_ < 0 ? lat : latency_ms_ * 0.9 + lat * 0.1;
     }
     return true;

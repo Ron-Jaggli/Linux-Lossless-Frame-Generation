@@ -11,7 +11,8 @@ desktop portal and presents an interpolated stream in its own window.
 ```
 PipeWire screencast (xdg-desktop-portal, DMA-BUF zero-copy w/ SHM fallback)
   → duplicate detection + cadence recovery        [milestone 2 ✓]
-  → LSFG frame interpolation 2x/3x/4x             [milestone 3]
+  → frame interpolation 2x/3x/4x                  [milestone 3a ✓ blend baseline;
+                                                   3b: LSFG shaders]
   → Vulkan presentation window (SDL3)             [milestone 1 ✓]
 ```
 
@@ -22,10 +23,11 @@ PipeWire screencast (xdg-desktop-portal, DMA-BUF zero-copy w/ SHM fallback)
 | 0 — DRM black-frame test (`--drm-test`) | implemented, needs a run against Crunchyroll |
 | 1 — capture → display passthrough | implemented |
 | 2 — duplicate detection + source cadence recovery | implemented |
-| 3 — LSFG shader integration, 2x interpolation | not started |
-| 4 — 3x/4x, cadence-locked interpolation, polish | not started |
+| 3a — frame pacing + pair leases + blend-baseline interpolation (2x/3x/4x) | implemented, needs a run on real hardware |
+| 3b — LSFG shader integration | not started |
+| 4 — cadence-locked interpolation polish | not started |
 
-Milestone 3 will consume Lossless Scaling's shipped shaders the same way
+Milestone 3b will consume Lossless Scaling's shipped shaders the same way
 lsfg-vk does — **you must own Lossless Scaling on Steam**; no assets are
 bundled here.
 
@@ -55,13 +57,19 @@ On a machine without the app's dependencies, configure with
 ## Usage
 
 ```sh
-lsfg-cap                     # pick a window, passthrough at display refresh
+lsfg-cap                     # pick a window, 2x frame generation (default)
+lsfg-cap -m 1                # plain passthrough at display refresh
 lsfg-cap --drm-test          # milestone 0: is the capture black? (exit 2 = black)
-lsfg-cap -m 3 --fullscreen   # multiplier is parsed now, applied in milestone 3
+lsfg-cap -m 3 --fullscreen   # 3x generation, fullscreen
 lsfg-cap --present-mode mailbox --no-dmabuf --verbose
 ```
 
-Keys: `F` fullscreen, `Esc`/`Q` quit.
+Keys: `F` fullscreen, `G` toggle frame generation, `Esc`/`Q` quit.
+
+Frame generation engages only once the cadence tracker locks onto the
+source rate; until then (and whenever it unlocks — pause, seek, scene
+of irregular repaints) the tool shows real frames unmodified. The stats
+line reports generated output as e.g. `output 60.0 fps (36.0 gen, 2x)`.
 
 The portal window picker appears on first run; the grant is remembered via a
 portal restore token (`~/.config/lsfg-cap/restore_token`), so later runs
@@ -112,13 +120,24 @@ I am using waterfox so like if you do run into problems then use chrome or water
   repeat pattern (e.g. `23.98 fps (3:2)` for film in a 60 Hz browser), also
   handling damage-driven compositors that never deliver duplicates. Shown in
   the stats line; milestone 3 consumes it to interpolate only unique frames.
+- **Frame generation (milestone 3a):** a pure, unit-tested `FramePacer`
+  decides at every display refresh what to show — the latest real frame,
+  or an in-between of the last two unique frames at a phase quantized to
+  the multiplier. The A→B interval plays over the source period after B
+  arrives, so interpolation inherently adds ~one source period of delay
+  (~42 ms at 24 fps): honest, measured, shown in the stats line — it can
+  exceed the 50 ms lipsync target on slow sources. The baseline
+  `Interpolator` is a single-pass compute blend `mix(A, B, phase)` —
+  expect ghosting on motion; it validates pairing, pacing, and present
+  timing so the LSFG shader chain (3b) can drop in behind the same
+  interface.
 - **Edge cases:** source resize renegotiates and rebuilds the pool; stream
   errors/session-close are detected and reported; corrupted chunks skipped;
   black frames detected by the same probe's mean luminance.
 
 ## Roadmap details
 
-- **Milestone 3:** LSFG shader chain lifted per lsfg-vk's approach, reading
+- **Milestone 3b:** LSFG shader chain lifted per lsfg-vk's approach, reading
   `Lossless.dll` from your Steam library (path autodetected from lsfg-vk's
   config when present).
 - **Config file** (`~/.config/lsfg-cap/config.toml`) for defaults; GUI later.

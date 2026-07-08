@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/cadence.hpp"
+#include "core/pacer.hpp"
 #include "vk/dmabuf_import.hpp"
 
 #include <atomic>
@@ -45,6 +46,12 @@ public:
     bool usingDmaBuf() const { return negotiated_dmabuf_.load(); }
     // snapshot of the recovered source cadence (duplicate-frame analysis)
     CadenceStats cadence() const;
+
+    // Frame pacing (frame generation). The pacer lives here because the
+    // capture thread feeds it unique-frame arrivals under the same lock as
+    // the cadence tracker; the render thread calls pace() every refresh.
+    void setPaceMultiplier(int m);
+    PaceDecision pace(double t_now);
 
 private:
     // PipeWire callbacks (run on the PipeWire loop thread)
@@ -127,6 +134,7 @@ private:
     std::vector<uint8_t> prev_probe_;
     bool prev_probe_valid_ = false;
     CadenceTracker cadence_tracker_;
+    FramePacer pacer_;
     mutable std::mutex cadence_mutex_;
 };
 
