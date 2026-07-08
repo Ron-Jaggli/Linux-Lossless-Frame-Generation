@@ -9,13 +9,16 @@
   window) were implemented on `claude/wizardly-clarke-4fk1ip`.
 - **2026-07-05 (evening):** Milestone 2 (duplicate detection + cadence
   recovery, unit tests, CI) implemented and merged as PR #2.
-- **2026-07-06 (this pass):** fresh recon of the milestone-2 codebase,
-  recorded below, plus the plan for the next increment: the interpolation
-  engine scaffolding for Milestone 3.
+- **2026-07-06:** recon of the milestone-2 codebase plus the Milestone 3a
+  scaffolding plan, merged as PR #3. The plan was approved but the code was
+  **not** implemented in that pass.
+- **2026-07-08 (this pass):** fresh recon in a new container, recorded below.
+  The goal of this pass is to *implement* Milestone 3a as planned in PR #3,
+  with two small corrections discovered during recon (see "Plan corrections").
 
-## Phase 1 recon — current state (2026-07-06)
+## Phase 1 recon — current state (2026-07-08)
 
-### Module map
+### Module map (verified against source; unchanged since PR #3)
 
 ```
 CMakeLists.txt           C++20; lsfg_core static lib (pure logic, no system
@@ -50,42 +53,49 @@ tests/test_cadence.cpp   7 scenario tests (3:2, 2:2, passthrough, damage-
                          assert harness, no external framework
 ```
 
+Since PR #3 only README/PLAN/.gitignore changed (three README wording commits
+by the owner sit on this branch, `claude/wizardly-clarke-0c6fc2`, ahead of
+main). None of the Milestone 3a code (`core/pacer.*`, pair leases,
+`vk/interpolate.*`) exists yet.
+
 ### Build & test baseline (this environment, fresh container)
 
 - Ubuntu 24.04 container, cmake 3.28 / ninja / g++ 13. Installed
-  `libpipewire-0.3-dev libportal-dev libvulkan-dev` from apt; SDL3 is still
-  not packaged on 24.04, so a minimal console-only SDL 3.4.12 was built from
-  the `sdl3-src` crate tarball (crates.io is reachable; GitHub is not) into a
-  scratch prefix for compile/link validation.
+  `libpipewire-0.3-dev libportal-dev libvulkan-dev glslang-tools` from apt.
+  SDL3 is still not packaged on 24.04; built a minimal SDL 3.2.20 from the
+  `sdl3-src` crate tarball (static.crates.io is reachable; GitHub is not)
+  into a scratch prefix for compile/link validation.
 - Core: `cmake -B build-core -G Ninja -DLSFG_BUILD_APP=OFF` → builds clean,
   `ctest` **1/1 passed** (the cadence suite).
-- App: compiles and links clean against the scratch SDL3 (see baseline note
-  in the commit that accompanies this plan). Nothing app-side is runtime
-  testable here: no display, no portal, no GPU. Runtime behavior is
-  validated on the owner's desktop.
+- App: full `lsfg-cap` compiles and links clean against the scratch SDL3,
+  zero warnings. Nothing app-side is runtime-testable here: no display, no
+  portal, no GPU. Runtime behavior is validated on the owner's desktop.
+- `glslangValidator` **is** available in this container (unlike the 07-06
+  pass), so the blend compute shader's SPIR-V can be generated and committed
+  from here, not just hand-checked.
 - CI (core tests only) is green on `main`.
 
-### Where the project stands
+### Plan corrections found during recon
 
-Milestones 0–2 are code-complete. The two open questions from the last plan
-are unchanged and cannot be answered from a container:
+1. **`publish()` does not yet know the duplicate verdict.** In
+   `Capture::handleProcess()` the pool publish happens *before*
+   `readProbe()` computes the duplicate flag (capture.cpp:407–409). The
+   probe readback is already fence-waited by that point (`submitAndWait`
+   precedes the whole block), so the fix is a small safe reorder: run
+   `readProbe()` first, have it return the duplicate verdict, and pass
+   `unique = !duplicate` into `publish()`. Frames without a probe
+   (`probe_pending_ == false`, e.g. first frame after renegotiation) count
+   as unique.
+2. **SDL version drift:** baseline validated against SDL 3.2.20 (not 3.4.x
+   as in the 07-06 note). No API impact; recorded for reproducibility.
 
-1. **The Milestone 0 hardware question** — is Crunchyroll-in-Firefox capture
-   black? Needs one manual `--drm-test` run on the owner's desktop.
-2. **Milestone 3** — actual frame interpolation.
+## Phase 2 — implement Milestone 3a: interpolation engine scaffolding
 
-## Phase 2 — Milestone 3a: interpolation engine scaffolding
-
-Milestone 3 as originally scoped ("lift the LSFG shader chain from
-Lossless.dll the way lsfg-vk does") has two hard external dependencies:
-the user-owned `Lossless.dll` and a real GPU to validate against — neither
-exists in this environment, and the lsfg-vk sources aren't reachable from
-here either. Attempting it now would mean stacking a large amount of
-unverifiable code.
-
-What *can* land now, fully buildable and partly unit-testable, is everything
-around that shader kernel — so that dropping the LSFG chain in later is a
-matter of implementing one interface on real hardware:
+Rationale unchanged from PR #3: the real LSFG shader lift needs the
+user-owned `Lossless.dll` and a GPU, neither present here. What can land
+now, fully buildable and partly unit-testable, is everything *around* that
+shader kernel — so dropping the LSFG chain in later means implementing one
+interface on real hardware:
 
 - **Frame pacing** (pure logic, unit-tested, CI-covered): decide, at every
   display refresh, what to show — which real frame, or which (A,B,phase)
@@ -117,15 +127,17 @@ matter of implementing one interface on real hardware:
    - `tests/test_pacer.cpp`, same harness style as the cadence tests:
      2x/3x/4x schedules at 24-in-60 and 30-in-60, passthrough fallback when
      unlocked, pause/resume, source-rate drift, phase monotonicity and
-     output-rate ≈ m × source fps.
-2. **Frame pool: unique-frame pair leases**
-   - `publish()` gains a `unique` flag (capture already knows duplicate
-     status at publish time from the probe compare).
+     output-rate ≈ m × source fps. Registered in CMake next to the cadence
+     test; runs in CI automatically.
+2. **Frame pool: unique flag + pair leases**
+   - Reorder `readProbe()` before `publish()` in `handleProcess()` (see
+     correction 1) so `publish()` gains a `unique` flag.
    - New `acquirePairRead()` → the two most recent unique frames (A, B) with
      their capture timestamps; slot count grows from 3 to 5 so the writer
-     still never blocks while a reader holds a pair. Existing single-frame
-     `acquireRead()` path unchanged — passthrough behavior identical after
-     this commit.
+     still never blocks while a reader holds a pair (5 slots ≥ 2 held by
+     reader + 2 latest uniques + 1 write target; asserted in debug builds).
+     Existing single-frame `acquireRead()` path unchanged — passthrough
+     behavior identical after this commit.
 3. **Interpolator interface + blend baseline**
    - `src/vk/interpolate.{hpp,cpp}`: `Interpolator` (record commands to
      produce `dst` from `(A, B, phase)`) and `BlendInterpolator` — one
@@ -134,9 +146,9 @@ matter of implementing one interface on real hardware:
    - Shader: `src/shaders/blend.comp` (GLSL) with the compiled SPIR-V
      committed as a generated header plus a `tools/gen_shaders.sh` regen
      script — no new hard build dependency; `glslangValidator` is needed
-     only when the GLSL changes.
-   - Compiles and unit of this commit is "app still builds; interpolator
-     constructed but not yet wired".
+     only when the GLSL changes (and is available here to generate it).
+   - Unit of this commit: "app still builds; interpolator constructed but
+     not yet wired".
 4. **Wire it up: pacer + interpolator in the render path**
    - Capture feeds `onUniqueFrame` (same lock as the cadence tracker).
    - `Renderer::drawFrame()` consults the pacer: `Interpolate` → run the
@@ -167,8 +179,8 @@ matter of implementing one interface on real hardware:
   by keeping every commit's default path (passthrough) byte-identical to
   today's behavior and gating FG behind the pacer's lock + multiplier.
 - **Pool growth / pair leasing deadlock**: the writer-never-blocks invariant
-  is preserved by slot arithmetic (5 slots ≥ 2 held by reader + 2 latest
-  uniques + 1 write); asserted in debug builds.
+  is preserved by slot arithmetic (see increment 2); asserted in debug
+  builds.
 - **Fades/overlays produce "unique" frames at pulldown positions**: pacer
   simply sees more uniques and shorter periods; worst case it presents real
   frames — degrades to passthrough, never worse than today.
