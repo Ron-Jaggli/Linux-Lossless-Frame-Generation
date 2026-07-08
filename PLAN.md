@@ -9,9 +9,32 @@
   window) were implemented on `claude/wizardly-clarke-4fk1ip`.
 - **2026-07-05 (evening):** Milestone 2 (duplicate detection + cadence
   recovery, unit tests, CI) implemented and merged as PR #2.
-- **2026-07-06 (this pass):** fresh recon of the milestone-2 codebase,
-  recorded below, plus the plan for the next increment: the interpolation
-  engine scaffolding for Milestone 3.
+- **2026-07-06:** fresh recon of the milestone-2 codebase plus the plan for
+  the interpolation engine scaffolding (Milestone 3a); reviewed and merged
+  as PR #3 — that merge is the approval this pass executes against.
+- **2026-07-08 (this pass):** re-verified the baseline in a fresh container
+  (core: clean build, cadence tests 1/1; app: compiles and links against a
+  scratch SDL 3.4.12 console build; glslang available), then implemented
+  Milestone 3a exactly as planned — four increments, each building clean
+  with tests green:
+  1. `FramePacer` (src/core/pacer.*) + `tests/test_pacer.cpp` (11 scenario
+     tests incl. an end-to-end run against `CadenceTracker`), in CI.
+  2. Frame pool pair leases: `publish()` takes the probe's unique verdict
+     (probe compare moved ahead of publish), `acquirePairRead()` leases the
+     last two uniques, slots 3 → 6 to keep the writer wait-free (worst case
+     protects a held pair + two current uniques + a duplicate latest).
+  3. `Interpolator` interface + `BlendInterpolator` (src/vk/interpolate.*),
+     one-pass compute `mix(A, B, phase)` into an owned R8G8B8A8
+     intermediate; SPIR-V committed as a generated header,
+     `tools/gen_shaders.sh` regenerates.
+  4. Wiring: capture owns/feeds the pacer, renderer polls it per refresh
+     and blends the leased pair; `-m` is live (default 2, 1 = off), `G`
+     toggles at runtime, stats line shows generated fps, video delay is
+     measured against interpolated content time. FG disabled in
+     `--drm-test`.
+  Not runtime-validated here (no GPU/portal in the container): the blend
+  pass, pair leasing under real pulldown, and the added latency figure all
+  need one `-m 2` run on the owner's desktop.
 
 ## Phase 1 recon — current state (2026-07-06)
 
@@ -167,8 +190,35 @@ matter of implementing one interface on real hardware:
   by keeping every commit's default path (passthrough) byte-identical to
   today's behavior and gating FG behind the pacer's lock + multiplier.
 - **Pool growth / pair leasing deadlock**: the writer-never-blocks invariant
-  is preserved by slot arithmetic (5 slots ≥ 2 held by reader + 2 latest
-  uniques + 1 write); asserted in debug builds.
+  is preserved by slot arithmetic; implemented with 6 slots (a duplicate
+  `latest` can coexist with two newer uniques while a pair is held, so the
+  plan's 5 was one short).
 - **Fades/overlays produce "unique" frames at pulldown positions**: pacer
   simply sees more uniques and shorter periods; worst case it presents real
   frames — degrades to passthrough, never worse than today.
+
+### Outcome (2026-07-08)
+
+Implemented in full; see History. One deviation from the letter of the
+plan, both noted above: 6 pool slots instead of 5 (slot arithmetic), and
+the pacer lives inside `Capture` (fed under the cadence lock) with the
+renderer polling through a callback, rather than a free-floating object.
+
+## Next pass (needs review before execution)
+
+Milestone 3b (the LSFG shader chain) stays blocked in this environment:
+it needs the user-owned `Lossless.dll`, a GPU, and the lsfg-vk sources,
+none reachable from the container. Before scoping it, the blend baseline
+needs its hardware shakedown. Proposed next increment, smallest first:
+
+1. **Owner validation run** (manual, on the desktop): `lsfg-cap -m 2`
+   against 24 fps video in a 60 Hz browser — confirm cadence locks, blend
+   frames appear (ghosting expected), `G` toggles cleanly, video delay
+   lands near source-period + capture latency, and no validation errors
+   with `--validate`. Findings drive the next plan.
+2. **Config file** (`~/.config/lsfg-cap/config.toml`): pure, unit-testable
+   INI/TOML-subset parser in `src/core/`, mapping the existing Options
+   fields; CLI overrides file. Buildable and CI-covered in-container.
+3. **Latency instrumentation polish**: split the stats delay into capture→
+   publish and publish→present so the interpolation hold is visible
+   separately from pipeline overhead.
