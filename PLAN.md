@@ -9,13 +9,16 @@
   window) were implemented on `claude/wizardly-clarke-4fk1ip`.
 - **2026-07-05 (evening):** Milestone 2 (duplicate detection + cadence
   recovery, unit tests, CI) implemented and merged as PR #2.
-- **2026-07-06 (this pass):** fresh recon of the milestone-2 codebase,
-  recorded below, plus the plan for the next increment: the interpolation
-  engine scaffolding for Milestone 3.
+- **2026-07-06:** recon of the milestone-2 codebase plus the Milestone 3a
+  scaffolding plan, merged as PR #3. **The 3a code itself was not written**
+  — that merge delivered the plan only.
+- **2026-07-08 (this pass):** fresh recon on `claude/wizardly-clarke-ar87jv`,
+  baseline re-verified, and the 3a plan revalidated against today's tree and
+  this container's tighter network policy. Phase 2 will execute it.
 
-## Phase 1 recon — current state (2026-07-06)
+## Phase 1 recon — current state (2026-07-08)
 
-### Module map
+### Module map (unchanged since the 2026-07-06 recon)
 
 ```
 CMakeLists.txt           C++20; lsfg_core static lib (pure logic, no system
@@ -24,68 +27,59 @@ CMakeLists.txt           C++20; lsfg_core static lib (pure logic, no system
 .github/workflows/ci.yml ubuntu-latest, LSFG_BUILD_APP=OFF, builds core and
                          runs ctest on every push/PR
 src/
-  main.cpp         273L  CLI parsing, portal pump, main loop, per-second
-                         stats line (capture/source cadence/present/latency),
-                         DRM black-frame verdict
-  options.hpp       21L  Options struct; multiplier parsed but inert so far
-  log.hpp           48L  leveled logging + monotonic nowSeconds()
-  portal.{hpp,cpp} 183L  xdg-desktop-portal ScreenCast handshake (libportal),
-                         picker, restore token, close signal
-  capture.{hpp,cpp}~950L PipeWire consumer: DMA-BUF negotiation w/ modifier
-                         fixation, SHM fallback + mid-stream renegotiation,
-                         copy into FramePool, 64×64 probe every frame →
-                         duplicate compare → CadenceTracker (mutex-guarded),
-                         luminance for the DRM test
-  renderer.{hpp,cpp}225L blits latest pool frame to SDL3/Vulkan swapchain,
-                         letterboxed; per-frame fence wait; latency EMA
-  core/cadence.*   ~200L CadenceTracker: recovers source fps + repeat pattern
-                         ("3:2", "2:2", …) from (timestamp, dup) events; pure,
-                         unit-tested
-  vk/context.*      402L instance/device/queue/swapchain, DRM modifier query
-  vk/frame_pool.*   202L triple-buffered VkImage pool, writer=capture thread,
-                         reader=render thread, publish/acquireRead leases
+  main.cpp          272L CLI parsing, portal pump, main loop, per-second
+                         stats line, DRM black-frame verdict   [uses SDL3]
+  options.hpp        20L Options struct; multiplier parsed but inert so far
+  log.hpp            48L leveled logging + monotonic nowSeconds()
+  portal.{hpp,cpp}  183L xdg-desktop-portal ScreenCast handshake (libportal)
+  capture.{hpp,cpp} 947L PipeWire consumer: DMA-BUF w/ modifier fixation,
+                         SHM fallback, copy into FramePool, 64×64 probe →
+                         duplicate compare → CadenceTracker (mutex-guarded)
+  renderer.{hpp,cpp}225L blits latest pool frame to swapchain, letterboxed;
+                         per-frame fence wait; latency EMA
+  core/cadence.*    203L CadenceTracker: recovers source fps + repeat
+                         pattern from (timestamp, dup) events; unit-tested
+  vk/context.*      402L instance/device/queue/swapchain     [uses SDL3]
+  vk/frame_pool.*   202L triple-buffered VkImage pool, writer=capture
+                         thread, reader=render thread, publish/acquireRead
   vk/dmabuf_import.*150L VkImage import of PipeWire DMA-BUF planes
-tests/test_cadence.cpp   7 scenario tests (3:2, 2:2, passthrough, damage-
-                         driven, jitter, cadence change, pause) via a tiny
-                         assert harness, no external framework
+tests/test_cadence.cpp   7 scenario tests via a tiny assert harness
 ```
 
-### Build & test baseline (this environment, fresh container)
+### Build & test baseline (this container, 2026-07-08)
 
-- Ubuntu 24.04 container, cmake 3.28 / ninja / g++ 13. Installed
-  `libpipewire-0.3-dev libportal-dev libvulkan-dev` from apt; SDL3 is still
-  not packaged on 24.04, so a minimal console-only SDL 3.4.12 was built from
-  the `sdl3-src` crate tarball (crates.io is reachable; GitHub is not) into a
-  scratch prefix for compile/link validation.
-- Core: `cmake -B build-core -G Ninja -DLSFG_BUILD_APP=OFF` → builds clean,
-  `ctest` **1/1 passed** (the cadence suite).
-- App: compiles and links clean against the scratch SDL3 (see baseline note
-  in the commit that accompanies this plan). Nothing app-side is runtime
-  testable here: no display, no portal, no GPU. Runtime behavior is
-  validated on the owner's desktop.
-- CI (core tests only) is green on `main`.
+- Ubuntu 24.04, cmake 3.28.3, ninja 1.11.1, g++ 13.3.
+- **Core: green.** `cmake -B build-core -G Ninja -DLSFG_BUILD_APP=OFF` builds
+  with zero warnings; `ctest` **1/1 passed** (cadence suite). CI is green on
+  `main`.
+- **App: partially compile-checkable here.** `libpipewire-0.3-dev
+  libportal-dev libvulkan-dev` installed from apt. SDL3 is still not packaged
+  on 24.04, and unlike the 2026-07-06 pass this session's network policy
+  blocks every SDL3 source (GitHub releases, libsdl.org, crates.io) — so no
+  scratch SDL3 build this time. What was verified instead: `-fsyntax-only`
+  with full warnings on every translation unit that doesn't include SDL
+  headers — `capture.cpp`, `portal.cpp`, `renderer.cpp`, `vk/frame_pool.cpp`,
+  `vk/dmabuf_import.cpp` — **all clean**. Only `main.cpp` and
+  `vk/context.cpp` include `SDL3/SDL.h` and cannot be compiled here.
+- `glslangValidator` 15.1.0 installed (needed by increment 3's shader).
+- Nothing app-side is runtime-testable here (no display/portal/GPU); runtime
+  validation stays on the owner's desktop, as before.
 
 ### Where the project stands
 
-Milestones 0–2 are code-complete. The two open questions from the last plan
-are unchanged and cannot be answered from a container:
+Milestones 0–2 are code-complete; milestone 3 has an approved plan (PR #3)
+but no code. The open items are unchanged:
 
-1. **The Milestone 0 hardware question** — is Crunchyroll-in-Firefox capture
-   black? Needs one manual `--drm-test` run on the owner's desktop.
-2. **Milestone 3** — actual frame interpolation.
+1. **Milestone 0 hardware question** — one manual `--drm-test` run against
+   Crunchyroll on the owner's desktop is still outstanding.
+2. **Milestone 3** — actual frame interpolation. This pass implements its
+   scaffolding half (3a).
 
-## Phase 2 — Milestone 3a: interpolation engine scaffolding
+## Phase 2 — implement Milestone 3a (per the PR #3 plan, revalidated)
 
-Milestone 3 as originally scoped ("lift the LSFG shader chain from
-Lossless.dll the way lsfg-vk does") has two hard external dependencies:
-the user-owned `Lossless.dll` and a real GPU to validate against — neither
-exists in this environment, and the lsfg-vk sources aren't reachable from
-here either. Attempting it now would mean stacking a large amount of
-unverifiable code.
-
-What *can* land now, fully buildable and partly unit-testable, is everything
-around that shader kernel — so that dropping the LSFG chain in later is a
-matter of implementing one interface on real hardware:
+The scope, interfaces, and increment order from the merged 2026-07-06 plan
+still fit today's tree exactly; they are restated below with two adjustments
+for this container's constraints (marked ✱).
 
 - **Frame pacing** (pure logic, unit-tested, CI-covered): decide, at every
   display refresh, what to show — which real frame, or which (A,B,phase)
@@ -94,63 +88,76 @@ matter of implementing one interface on real hardware:
   *last two unique* source frames; today the pool only exposes "latest".
 - **A pluggable `Interpolator` interface with a linear-blend baseline**:
   `mix(A, B, phase)` in a small compute shader. Blend is visually mediocre
-  (ghosting on motion) but it exercises the entire pipeline — pairing,
-  pacing, extra GPU pass, present timing — and gives a working `-m 2/3/4`
-  end-to-end. The LSFG chain later replaces the blend behind the same
-  interface.
+  but exercises the entire pipeline and gives a working `-m 2/3/4`
+  end-to-end; the LSFG chain later replaces it behind the same interface.
 
 ### Increments (each: build clean, tests green, commit)
 
 1. **Add frame pacer with unit tests**
    - `src/core/pacer.{hpp,cpp}`: `FramePacer`, pure std-only, single-threaded
-     by contract (like `CadenceTracker`).
-   - Input: `onUniqueFrame(seq, t_arrival)` from the capture side, plus the
-     current source-fps estimate and multiplier m. Query:
-     `decide(t_now) -> {mode, phase}` where mode is `Passthrough` (show
-     latest real frame) or `Interpolate` (show pair blend at `phase` ∈ [0,1)).
+     by contract (like `CadenceTracker`); added to `lsfg_core`.
+   - Input: `onUniqueFrame(seq, t_arrival)` plus the current source-fps
+     estimate and multiplier m. Query: `decide(t_now) -> {mode, phase}` where
+     mode is `Passthrough` (show latest real frame) or `Interpolate` (show
+     pair blend at `phase` ∈ [0,1)).
    - Model: when unique frame B arrives, the A→B interval is presented over
-     the *next* source period (one-source-frame display delay, inherent to
+     the *next* source period (one-source-period display delay, inherent to
      interpolation); phase advances linearly against the recovered source
      period. Falls back to `Passthrough` whenever cadence is not locked,
-     m == 1, or arrivals stop (pause → hold last frame; the >0.5 s gap rule
-     matches the cadence tracker's reset).
+     m == 1, or arrivals stop (>0.5 s gap → hold last frame, matching the
+     cadence tracker's reset rule).
    - `tests/test_pacer.cpp`, same harness style as the cadence tests:
-     2x/3x/4x schedules at 24-in-60 and 30-in-60, passthrough fallback when
-     unlocked, pause/resume, source-rate drift, phase monotonicity and
-     output-rate ≈ m × source fps.
+     2x/3x/4x at 24-in-60 and 30-in-60, passthrough fallback when unlocked,
+     pause/resume, source-rate drift, phase monotonicity, output-rate ≈
+     m × source fps. Registered in CMake next to the cadence test; runs in
+     CI automatically.
 2. **Frame pool: unique-frame pair leases**
    - `publish()` gains a `unique` flag (capture already knows duplicate
      status at publish time from the probe compare).
    - New `acquirePairRead()` → the two most recent unique frames (A, B) with
-     their capture timestamps; slot count grows from 3 to 5 so the writer
-     still never blocks while a reader holds a pair. Existing single-frame
-     `acquireRead()` path unchanged — passthrough behavior identical after
-     this commit.
+     capture timestamps; slot count grows 3 → 5 so the writer still never
+     blocks while a reader holds a pair (5 ≥ 2 held + 2 latest uniques + 1
+     write; asserted in debug builds). Existing `acquireRead()` unchanged —
+     passthrough behavior identical after this commit.
 3. **Interpolator interface + blend baseline**
-   - `src/vk/interpolate.{hpp,cpp}`: `Interpolator` (record commands to
-     produce `dst` from `(A, B, phase)`) and `BlendInterpolator` — one
-     compute pipeline sampling A and B, writing an owned intermediate
-     image (format chosen by us, so storage support is a non-issue).
-   - Shader: `src/shaders/blend.comp` (GLSL) with the compiled SPIR-V
-     committed as a generated header plus a `tools/gen_shaders.sh` regen
-     script — no new hard build dependency; `glslangValidator` is needed
-     only when the GLSL changes.
-   - Compiles and unit of this commit is "app still builds; interpolator
-     constructed but not yet wired".
+   - `src/vk/interpolate.{hpp,cpp}`: `Interpolator` (record commands
+     producing `dst` from `(A, B, phase)`) and `BlendInterpolator` — one
+     compute pipeline sampling A and B into an owned intermediate image.
+   - Shader `src/shaders/blend.comp` (GLSL); compiled SPIR-V committed as a
+     generated header via `tools/gen_shaders.sh` — no new hard build
+     dependency (`glslangValidator` needed only when the GLSL changes; it is
+     available in this container and the header will be regenerated and
+     committed here).
+   - Deliverable of this commit: app still builds; interpolator constructed
+     but not yet wired.
 4. **Wire it up: pacer + interpolator in the render path**
    - Capture feeds `onUniqueFrame` (same lock as the cadence tracker).
    - `Renderer::drawFrame()` consults the pacer: `Interpolate` → run the
-     blend into the intermediate and blit that to the swapchain, else blit
-     the latest real frame as today.
-   - `-m N` now takes effect (m=1 forces passthrough); `G` key toggles frame
-     generation at runtime; stats line grows `output 120.0 fps (2x gen)` and
-     the video-delay figure now includes the inherent one-source-period hold.
+     blend into the intermediate and blit that to the swapchain; else blit
+     the latest real frame exactly as today.
+   - `-m N` takes effect (m=1 forces passthrough); `G` toggles frame
+     generation at runtime; stats line grows `output 120.0 fps (2x gen)`;
+     the video-delay figure includes the inherent one-source-period hold.
    - README: milestone 3a status, usage, and an honest note on blend quality
-     and the added latency (~42 ms at 24 fps source), which will exceed the
-     50 ms lipsync target on some setups — measured and displayed, tunable
-     later.
-5. **CI unchanged** — new pacer tests run under the existing
+     and added latency (~42 ms at 24 fps source vs the 50 ms lipsync
+     target — measured and displayed, tunable later).
+5. **CI unchanged** — pacer tests run under the existing
    `LSFG_BUILD_APP=OFF` job automatically.
+
+### ✱ Adjustments vs the PR #3 plan (container constraints)
+
+- **No SDL3 obtainable here**, so `main.cpp` and `vk/context.cpp` cannot be
+  compiled in this environment. Mitigations: keep increment-4 diffs to those
+  two files minimal (option plumbing, one key case, stats-line string); and
+  before committing, syntax-check them against a scratchpad-only stub of the
+  few `SDL3/SDL.h` declarations they use (stub lives in the scratchpad, is
+  never committed, and proves nothing beyond "the diff parses and
+  type-checks against declared signatures"). Every other touched file —
+  pacer, pool, interpolator, renderer, capture — compiles for real here
+  with full warnings.
+- **Verification asymmetry is called out per commit**: commit messages for
+  increments 3–4 will state what was compile-verified vs what needs the
+  owner's desktop, so nothing reads as runtime-validated when it isn't.
 
 ### Explicitly out of scope for this pass
 
@@ -162,13 +169,13 @@ matter of implementing one interface on real hardware:
 
 ### Risks
 
-- **No GPU here**: increments 2–4 are compile-tested only in this
-  environment; runtime validation happens on the owner's desktop. Mitigated
-  by keeping every commit's default path (passthrough) byte-identical to
-  today's behavior and gating FG behind the pacer's lock + multiplier.
-- **Pool growth / pair leasing deadlock**: the writer-never-blocks invariant
-  is preserved by slot arithmetic (5 slots ≥ 2 held by reader + 2 latest
-  uniques + 1 write); asserted in debug builds.
-- **Fades/overlays produce "unique" frames at pulldown positions**: pacer
-  simply sees more uniques and shorter periods; worst case it presents real
+- **No GPU here**: increments 2–4 are compile-tested only; runtime
+  validation happens on the owner's desktop. Mitigated by keeping every
+  commit's default path (passthrough) byte-identical to today's behavior
+  and gating FG behind the pacer's lock + multiplier.
+- **Untestable main.cpp/context.cpp edits** (new this pass, see ✱ above):
+  kept minimal and stub-syntax-checked; worst case is a compile error the
+  owner hits on first desktop build of increment 4, isolated to one commit.
+- **Fades/overlays produce "unique" frames at pulldown positions**: the
+  pacer sees more uniques and shorter periods; worst case it presents real
   frames — degrades to passthrough, never worse than today.
