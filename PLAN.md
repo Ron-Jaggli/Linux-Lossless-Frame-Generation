@@ -9,9 +9,18 @@
   window) were implemented on `claude/wizardly-clarke-4fk1ip`.
 - **2026-07-05 (evening):** Milestone 2 (duplicate detection + cadence
   recovery, unit tests, CI) implemented and merged as PR #2.
-- **2026-07-06 (this pass):** fresh recon of the milestone-2 codebase,
-  recorded below, plus the plan for the next increment: the interpolation
-  engine scaffolding for Milestone 3.
+- **2026-07-06:** fresh recon of the milestone-2 codebase, recorded below,
+  plus the plan for the next increment: the interpolation engine scaffolding
+  for Milestone 3. Reviewed and approved by merge of PR #3.
+- **2026-07-08 (this pass):** re-established the build/test baseline in a
+  fresh container (identical result: core `ctest` 1/1 green, full app
+  compiles and links against a scratch SDL 3.4.12 built with
+  `-DSDL_UNIX_CONSOLE_BUILD=ON`; no GPU/display for runtime testing), then
+  executed the approved milestone-3a increments below. One correction found
+  during implementation: guaranteeing a never-blocking writer alongside a
+  held pair lease needs **6** pool slots, not 5 — worst case the writer must
+  avoid 2 reader-held slots + `latest` (a duplicate, distinct from any
+  unique) + the 2 tracked uniques.
 
 ## Phase 1 recon — current state (2026-07-06)
 
