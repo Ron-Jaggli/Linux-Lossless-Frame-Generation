@@ -1,0 +1,27 @@
+// Linear blend of two captured frames: the baseline Interpolator. Knowingly
+// naive (ghosts on motion) — it exists to exercise the pairing/pacing/present
+// pipeline; the LSFG chain replaces it behind the same interface.
+//
+// Regenerate the committed SPIR-V header with tools/gen_shaders.sh.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D img_a;
+layout(binding = 1) uniform sampler2D img_b;
+layout(binding = 2, rgba8) uniform writeonly image2D dst;
+
+layout(push_constant) uniform PC {
+    float phase; // 0 = frame A, 1 = frame B
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(dst);
+    if (p.x >= size.x || p.y >= size.y)
+        return;
+    vec2 uv = (vec2(p) + 0.5) / vec2(size);
+    vec4 a = textureLod(img_a, uv, 0.0);
+    vec4 b = textureLod(img_b, uv, 0.0);
+    imageStore(dst, p, mix(a, b, pc.phase));
+}
