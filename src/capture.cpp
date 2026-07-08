@@ -403,10 +403,11 @@ void Capture::handleProcess() {
                 if (std::abs(pts_s - t_cap) < 1.0)
                     t_cap = pts_s;
             }
+            // Read the probe before publishing so the pool learns whether
+            // this frame is a duplicate (duplicates are not pair material).
+            bool duplicate = probe_pending_ && readProbe(t_cap);
             uint64_t seq = frames_.fetch_add(1) + 1;
-            pool_->publish(idx, seq, t_cap);
-            if (probe_pending_)
-                readProbe(t_cap);
+            pool_->publish(idx, seq, t_cap, !duplicate);
         }
     }
     pw_stream_queue_buffer(stream_, last);
@@ -621,7 +622,7 @@ void Capture::recordProbeFromPool(VkCommandBuffer cmd, VkImage pool_img) {
     probe_pending_ = true;
 }
 
-void Capture::readProbe(double t_frame) {
+bool Capture::readProbe(double t_frame) {
     probe_pending_ = false;
     const auto* px = static_cast<const uint8_t*>(probe_map_);
 
@@ -658,6 +659,7 @@ void Capture::readProbe(double t_frame) {
     if (luma > prev)
         max_luma_.store(luma);
     luma_samples_.fetch_add(1);
+    return duplicate;
 }
 
 CadenceStats Capture::cadence() const {
