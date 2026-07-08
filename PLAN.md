@@ -9,9 +9,12 @@
   window) were implemented on `claude/wizardly-clarke-4fk1ip`.
 - **2026-07-05 (evening):** Milestone 2 (duplicate detection + cadence
   recovery, unit tests, CI) implemented and merged as PR #2.
-- **2026-07-06 (this pass):** fresh recon of the milestone-2 codebase,
-  recorded below, plus the plan for the next increment: the interpolation
-  engine scaffolding for Milestone 3.
+- **2026-07-06:** fresh recon of the milestone-2 codebase plus the plan for
+  the next increment: the interpolation engine scaffolding for Milestone 3
+  ("Milestone 3a" below). Reviewed and merged as PR #3.
+- **2026-07-08 (this pass):** recon re-run (baseline below); the module map
+  from 2026-07-06 is unchanged and still accurate. This pass executes the
+  approved Milestone 3a increments on `claude/wizardly-clarke-yl1gcv`.
 
 ## Phase 1 recon — current state (2026-07-06)
 
@@ -50,7 +53,26 @@ tests/test_cadence.cpp   7 scenario tests (3:2, 2:2, passthrough, damage-
                          assert harness, no external framework
 ```
 
-### Build & test baseline (this environment, fresh container)
+### Build & test baseline (2026-07-08, fresh container)
+
+- Same environment shape as 2026-07-06: Ubuntu 24.04, cmake 3.28 / ninja /
+  g++ 13. `libpipewire-0.3-dev libportal-dev libvulkan-dev glslang-tools`
+  installed from apt; SDL 3.4.12 rebuilt console-only from the `sdl3-src`
+  crate tarball (`static.crates.io` is reachable with a User-Agent header;
+  the crates.io API endpoint and GitHub are not).
+- Core: `cmake -B build-core -G Ninja -DLSFG_BUILD_APP=OFF` → builds clean,
+  `ctest` **1/1 passed**.
+- App: configures, compiles, and links clean against the scratch SDL3.
+- `main` is otherwise unchanged since the 2026-07-06 recon (only README
+  edits landed); the Milestone 3a plan below is approved but not yet
+  implemented — no pacer, pair leases, or interpolator sources exist.
+- One deviation adopted during implementation: the frame pool grows to
+  **6 slots, not 5** — the plan's arithmetic missed that the latest
+  *duplicate* frame must also stay readable for passthrough while a stale
+  pair is held, so the worst-case busy set is 5 (pair 2 + latest uniques 2 +
+  latest dup 1) and the writer needs a 6th to never block.
+
+### Build & test baseline (2026-07-06, fresh container)
 
 - Ubuntu 24.04 container, cmake 3.28 / ninja / g++ 13. Installed
   `libpipewire-0.3-dev libportal-dev libvulkan-dev` from apt; SDL3 is still
