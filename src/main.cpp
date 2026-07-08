@@ -116,7 +116,8 @@ static int run(const Options& opts) {
     // loop; both sides go through pacer_mutex.
     FramePacer pacer;
     std::mutex pacer_mutex;
-    pacer.setMultiplier(opts.multiplier);
+    // The DRM test measures capture, not generation: keep it passthrough.
+    pacer.setMultiplier(opts.drm_test ? 1 : opts.multiplier);
     renderer.enableFrameGen(&pacer, &pacer_mutex);
 
     std::atomic<bool> session_closed{false};

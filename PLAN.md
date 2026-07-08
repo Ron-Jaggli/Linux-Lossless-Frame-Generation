@@ -98,6 +98,14 @@ are unchanged and cannot be answered from a container:
 
 ## Phase 2 — Milestone 3a: interpolation engine scaffolding
 
+> **Status (2026-07-08):** increments 1–5 below are implemented on
+> `claude/wizardly-clarke-yl1gcv`, one commit per increment, core tests
+> green (cadence + pacer) and the app compiling/linking clean at every
+> step. Two deliberate deviations from the text below: the pool has **6**
+> slots (see the 2026-07-08 baseline note), and `--drm-test` forces the
+> multiplier to 1 so the capture verdict is never entangled with
+> generation. Runtime validation on real hardware is still pending.
+
 Milestone 3 as originally scoped ("lift the LSFG shader chain from
 Lossless.dll the way lsfg-vk does") has two hard external dependencies:
 the user-owned `Lossless.dll` and a real GPU to validate against — neither
