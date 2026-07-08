@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -35,6 +36,10 @@ public:
                uint32_t node_id, bool allow_dmabuf);
     void stop();
 
+    // Invoked on the capture thread for every unique (non-duplicate) frame,
+    // right after it is published to the pool. Set before start().
+    std::function<void(uint64_t seq, double t_capture)> on_unique_frame;
+
     // polled by the main thread
     uint64_t frameCount() const { return frames_.load(); }
     bool hasError() const { return error_flag_.load(); }
@@ -62,7 +67,9 @@ private:
                         bool probe);
     void recordProbeFromPool(VkCommandBuffer cmd, VkImage pool_img);
     bool submitAndWait(VkCommandBuffer cmd);
-    void readProbe(double t_frame);
+    // Consumes the pending probe readback; returns true when the frame is a
+    // duplicate of the previous one.
+    bool readProbe(double t_frame);
     void fallbackToShm();
 
     std::vector<const spa_pod*> buildFormatParams(spa_pod_builder* b,

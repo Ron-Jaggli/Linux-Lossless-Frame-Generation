@@ -404,9 +404,13 @@ void Capture::handleProcess() {
                     t_cap = pts_s;
             }
             uint64_t seq = frames_.fetch_add(1) + 1;
-            pool_->publish(idx, seq, t_cap);
-            if (probe_pending_)
-                readProbe(t_cap);
+            // The frame's GPU work is fence-waited inside processDmaBuf/
+            // processShm, so the probe verdict is available before publish;
+            // the pool needs it to track the unique-frame pair.
+            bool duplicate = probe_pending_ && readProbe(t_cap);
+            pool_->publish(idx, seq, t_cap, !duplicate);
+            if (on_unique_frame && !duplicate)
+                on_unique_frame(seq, t_cap);
         }
     }
     pw_stream_queue_buffer(stream_, last);
@@ -621,7 +625,7 @@ void Capture::recordProbeFromPool(VkCommandBuffer cmd, VkImage pool_img) {
     probe_pending_ = true;
 }
 
-void Capture::readProbe(double t_frame) {
+bool Capture::readProbe(double t_frame) {
     probe_pending_ = false;
     const auto* px = static_cast<const uint8_t*>(probe_map_);
 
@@ -658,6 +662,7 @@ void Capture::readProbe(double t_frame) {
     if (luma > prev)
         max_luma_.store(luma);
     luma_samples_.fetch_add(1);
+    return duplicate;
 }
 
 CadenceStats Capture::cadence() const {

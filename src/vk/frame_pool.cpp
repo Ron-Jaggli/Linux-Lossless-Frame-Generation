@@ -3,6 +3,8 @@
 #include "log.hpp"
 #include "vk/context.hpp"
 
+#include <cassert>
+
 namespace lsfg::vk {
 
 static const char* TAG = "pool";
@@ -16,11 +18,13 @@ bool FramePool::create(Context& ctx, VkFormat format, uint32_t width,
 
 bool FramePool::recreate(VkFormat format, uint32_t width, uint32_t height) {
     std::unique_lock lock(mutex_);
-    reader_done_.wait(lock, [&] { return reading_ == -1; });
+    reader_done_.wait(lock, [&] { return !anyReaderLocked(); });
     // The reader fence-waits its blit before releasing, and the writer
     // fence-waits before publishing, so no GPU work references these images.
     destroySlotsLocked();
     latest_ = -1;
+    latest_unique_ = -1;
+    prev_unique_ = -1;
     return createSlotsLocked(format, width, height);
 }
 
@@ -56,16 +60,28 @@ bool FramePool::createSlotsLocked(VkFormat format, uint32_t width,
             logError(TAG, "image memory allocation failed");
             return false;
         }
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = slot.image;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = format;
+        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (vkCreateImageView(ctx_->device, &vci, nullptr, &slot.view) !=
+            VK_SUCCESS) {
+            logError(TAG, "vkCreateImageView failed");
+            return false;
+        }
     }
     format_ = format;
     width_ = width;
     height_ = height;
-    logInfo(TAG, "frame pool: 3x %ux%u", width, height);
+    logInfo(TAG, "frame pool: %dx %ux%u", SLOT_COUNT, width, height);
     return true;
 }
 
 void FramePool::destroySlotsLocked() {
     for (auto& slot : slots_) {
+        if (slot.view)
+            vkDestroyImageView(ctx_->device, slot.view, nullptr);
         if (slot.image)
             vkDestroyImage(ctx_->device, slot.image, nullptr);
         if (slot.memory)
@@ -81,23 +97,34 @@ void FramePool::destroy() {
     std::unique_lock lock(mutex_);
     destroySlotsLocked();
     latest_ = -1;
+    latest_unique_ = -1;
+    prev_unique_ = -1;
     reading_ = -1;
+    reading_a_ = reading_b_ = -1;
 }
 
 int FramePool::acquireWrite() {
     std::unique_lock lock(mutex_);
-    for (int i = 0; i < 3; i++) {
-        if (i != latest_ && i != reading_)
+    for (int i = 0; i < SLOT_COUNT; i++) {
+        if (i != latest_ && i != latest_unique_ && i != prev_unique_ &&
+            i != reading_ && i != reading_a_ && i != reading_b_)
             return i;
     }
-    return 0; // unreachable
+    // Unreachable while the reader holds at most one lease at a time.
+    assert(false && "frame pool has no free slot");
+    return 0;
 }
 
-void FramePool::publish(int index, uint64_t seq, double t_capture) {
+void FramePool::publish(int index, uint64_t seq, double t_capture,
+                        bool unique) {
     std::unique_lock lock(mutex_);
     slots_[index].seq = seq;
     slots_[index].t_capture = t_capture;
     latest_ = index;
+    if (unique) {
+        prev_unique_ = latest_unique_;
+        latest_unique_ = index;
+    }
 }
 
 FramePool::ReadLease FramePool::acquireRead() {
@@ -108,6 +135,7 @@ FramePool::ReadLease FramePool::acquireRead() {
     reading_ = latest_;
     lease.index = latest_;
     lease.image = slots_[latest_].image;
+    lease.view = slots_[latest_].view;
     lease.width = width_;
     lease.height = height_;
     lease.seq = slots_[latest_].seq;
@@ -120,6 +148,37 @@ void FramePool::releaseRead(const ReadLease& lease) {
         return;
     std::unique_lock lock(mutex_);
     reading_ = -1;
+    reader_done_.notify_all();
+}
+
+FramePool::PairLease FramePool::acquirePairRead() {
+    std::unique_lock lock(mutex_);
+    PairLease lease;
+    if (prev_unique_ < 0 || latest_unique_ < 0 ||
+        prev_unique_ == latest_unique_ || !valid())
+        return lease;
+    reading_a_ = prev_unique_;
+    reading_b_ = latest_unique_;
+    lease.index_a = prev_unique_;
+    lease.index_b = latest_unique_;
+    lease.image_a = slots_[prev_unique_].image;
+    lease.image_b = slots_[latest_unique_].image;
+    lease.view_a = slots_[prev_unique_].view;
+    lease.view_b = slots_[latest_unique_].view;
+    lease.width = width_;
+    lease.height = height_;
+    lease.seq_a = slots_[prev_unique_].seq;
+    lease.seq_b = slots_[latest_unique_].seq;
+    lease.t_capture_a = slots_[prev_unique_].t_capture;
+    lease.t_capture_b = slots_[latest_unique_].t_capture;
+    return lease;
+}
+
+void FramePool::releasePairRead(const PairLease& lease) {
+    if (lease.index_b < 0)
+        return;
+    std::unique_lock lock(mutex_);
+    reading_a_ = reading_b_ = -1;
     reader_done_.notify_all();
 }
 
